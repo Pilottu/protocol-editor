@@ -1,0 +1,9 @@
+[database]
+server = (localdb)\MSSQLLocalDB
+database = ProtocolDB
+auth = windows
+user = 
+password = 
+encrypt = no
+trust_cert = yes
+backup_dir = E:\Prog\Piton\data
