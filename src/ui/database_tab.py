@@ -394,8 +394,11 @@ class DatabaseTab(QWidget):
         btn_conn_row = QHBoxLayout()
         self.btn_test = QPushButton("Проверить соединение")
         self.btn_save = QPushButton("Сохранить настройки")
+        self.btn_restart = QPushButton("Перезапустить программу")
+        self.btn_restart.setVisible(False)   # скрыта, пока не сохранили
         btn_conn_row.addWidget(self.btn_test)
         btn_conn_row.addWidget(self.btn_save)
+        btn_conn_row.addWidget(self.btn_restart)
         btn_conn_row.addStretch()
         layout.addLayout(btn_conn_row)
 
@@ -469,6 +472,7 @@ class DatabaseTab(QWidget):
         # --- Сигналы ---
         self.btn_test.clicked.connect(self.on_test)
         self.btn_save.clicked.connect(self.on_save)
+        self.btn_restart.clicked.connect(self.on_restart)
         self.btn_backup.clicked.connect(self.on_backup)
         btn_browse.clicked.connect(self.on_browse)
         self.btn_download.clicked.connect(self.on_download)
@@ -664,10 +668,20 @@ class DatabaseTab(QWidget):
         cfg = self._collect_cfg()
         save_config(cfg)
         reload_config()
-        QMessageBox.information(self, "Сохранено", "Настройки сохранены.")
-        self.conn_status.setText("Настройки сохранены. Перезапустите.")
+        self.conn_status.setText("✅ Настройки сохранены. Требуется перезапуск.")
         self.conn_status.setStyleSheet("color: blue;")
+        self.btn_restart.setVisible(True)
+    def on_restart(self):
+        """Перезапускает текущий процесс программы."""
+        import subprocess
+        python = sys.executable
+        script = os.path.abspath(sys.argv[0])
+        args = sys.argv[1:]
 
+        from PyQt6.QtWidgets import QApplication
+        QApplication.instance().quit()
+        subprocess.Popen([python, script, *args])
+        
     # --- Миграция ---
 
     def on_migrate(self):

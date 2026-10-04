@@ -1,12 +1,17 @@
 """
-Миграция Access (.mdb) → SQL Server (LocalDB или обычный).
+Миграция Access (.mdb) → SQL Server (LocalDB).
 
-Источник (.mdb) — папка source_dir.
-Целевые файлы (.mdf/.ldf) — папка target_dir (обычно Program Files/.../data).
+Порядок:
+  1. CREATE DATABASE без указания пути (SQL Server сам выберет папку).
+  2. DROP DATABASE (файлы остаются в папке SQL Server).
+  3. Переносим .mdf/.ldf в target_dir.
+  4. CREATE DATABASE ... FOR ATTACH (привязываем к новым файлам).
+  5. Мигрируем таблицы.
 """
 
 import os
 import time
+import shutil
 import pyodbc
 from datetime import datetime
 from typing import Callable, Optional
@@ -84,6 +89,8 @@ class Migrator:
         self.log = log or (lambda msg: None)
         self.progress = progress or (lambda p: None)
 
+    # -----------------------------------------------------
+
     def run(self):
         self.log("=== Начало миграции ===")
         self.progress(0)
@@ -103,7 +110,7 @@ class Migrator:
         if not mdb_paths:
             raise RuntimeError("В папке нет ни одного .mdb-файла")
 
-        self._create_database()
+        self._create_and_move_database()
         self.progress(10)
 
         total_steps = 0
@@ -126,12 +133,25 @@ class Migrator:
         self.progress(100)
         self.log("=== Миграция завершена ===")
 
-    def _create_database(self):
-        self.log(f"Создание базы '{self.sql_database}'...")
-        cfg_master = self.conn_builder("master")
-        conn = pyodbc.connect(cfg_master, autocommit=True)
-        cur = conn.cursor()
+    # -----------------------------------------------------
+    #  Создание базы → перенос файлов → ATTACH
+    # -----------------------------------------------------
 
+    def _create_and_move_database(self):
+        """
+        1. CREATE DATABASE.
+        2. Получаем реальные пути к .mdf/.ldf.
+        3. sp_detach_db (отсоединяем базу, файлы остаются).
+        4. Копируем файлы в target_dir.
+        5. CREATE DATABASE ... FOR ATTACH.
+        6. Удаляем исходные файлы.
+        """
+        self.log(f"Создание базы '{self.sql_database}' (в папке SQL Server)...")
+
+        conn_master = pyodbc.connect(self.conn_builder("master"), autocommit=True)
+        cur = conn_master.cursor()
+
+        # На случай, если база уже существует — удаляем
         cur.execute("SELECT name FROM sys.databases WHERE name = ?", self.sql_database)
         if cur.fetchone():
             self.log(f"  База '{self.sql_database}' существует — удаляю")
@@ -141,37 +161,127 @@ class Migrator:
                     f"SET SINGLE_USER WITH ROLLBACK IMMEDIATE"
                 )
                 cur.execute(f"DROP DATABASE [{self.sql_database}]")
-                self.log("  База удалена")
+                time.sleep(1)
             except Exception as e:
-                self.log(f"  Предупреждение при DROP: {e}")
+                self.log(f"  ⚠ Не удалось удалить базу: {e}")
+                self.log(f"  ⚠ Возможно, это 'висячая' база. Пропускаю.")
+                # Пробуем force drop через sys.databases
+                try:
+                    cur.execute(f"DROP DATABASE [{self.sql_database}]")
+                    time.sleep(1)
+                except Exception:
+                    raise RuntimeError(
+                        f"База '{self.sql_database}' существует, но не удаляется.\n"
+                        f"Выполните вручную:\n"
+                        f"  sqllocaldb stop MSSQLLocalDB\n"
+                        f"  sqllocaldb delete MSSQLLocalDB\n"
+                        f"  sqllocaldb create MSSQLLocalDB\n"
+                        f"  sqllocaldb start MSSQLLocalDB"
+                    )
 
+        # --- 1. CREATE DATABASE ---
+        cur.execute(f"CREATE DATABASE [{self.sql_database}]")
+        self.log(f"  База '{self.sql_database}' создана")
+
+        # --- 2. Получаем пути ---
+        cur.execute(
+            "SELECT physical_name FROM sys.master_files "
+            "WHERE database_id = DB_ID(?) ORDER BY file_id",
+            self.sql_database
+        )
+        rows = cur.fetchall()
+        if len(rows) < 2:
+            raise RuntimeError(f"Не удалось получить пути: {rows}")
+
+        src_mdf = rows[0][0]
+        src_ldf = rows[1][0]
+        self.log(f"  MDF: {src_mdf}")
+        self.log(f"  LDF: {src_ldf}")
+
+        # --- 3. sp_detach_db (отсоединяем — файлы остаются) ---
+        self.log("  Отсоединяю базу (sp_detach_db)...")
+        cur.execute(
+            f"ALTER DATABASE [{self.sql_database}] "
+            f"SET SINGLE_USER WITH ROLLBACK IMMEDIATE"
+        )
+        cur.execute(f"EXEC sp_detach_db '{self.sql_database}'")
+        conn_master.close()
         time.sleep(2)
 
+        self.log("  База отсоединена, файлы свободны")
+
+        # --- 4. Проверяем, что исходные файлы существуют ---
+        if not os.path.exists(src_mdf):
+            raise RuntimeError(f"Исходный файл не найден: {src_mdf}")
+        if not os.path.exists(src_ldf):
+            raise RuntimeError(f"Исходный файл не найден: {src_ldf}")
+
+        # --- 5. Копируем в target_dir ---
         os.makedirs(self.target_dir, exist_ok=True)
 
-        mdf_path = os.path.normpath(
-            os.path.join(self.target_dir, f"{self.sql_database}.mdf")
-        )
-        ldf_path = os.path.normpath(
-            os.path.join(self.target_dir, f"{self.sql_database}_log.ldf")
-        )
+        dst_mdf = os.path.join(self.target_dir, f"{self.sql_database}.mdf")
+        dst_ldf = os.path.join(self.target_dir, f"{self.sql_database}_log.ldf")
 
-        for p in (mdf_path, ldf_path):
+        for p in (dst_mdf, dst_ldf):
             if os.path.exists(p):
-                try:
-                    os.remove(p)
-                    self.log(f"  Удалён файл: {p}")
-                except Exception as e:
-                    raise RuntimeError(f"Файл занят или недоступен: {p}\n{e}")
+                os.remove(p)
+
+        self.log(f"  Копирую в {self.target_dir}...")
+        shutil.copy2(src_mdf, dst_mdf)
+        shutil.copy2(src_ldf, dst_ldf)
+                # Выдаём SQL Server полный доступ к файлам
+        import subprocess
+        import getpass
+        current_user = getpass.getuser()
+        user_domain = os.environ.get("USERDOMAIN", "")
+        account = f"{user_domain}\\{current_user}" if user_domain else current_user
+
+        for path in (dst_mdf, dst_ldf):
+            try:
+                subprocess.run(
+                    ["icacls", path, "/grant", f"{account}:F"],
+                    check=True, capture_output=True, text=True
+                )
+                self.log(f"  Права выданы: {path}")
+            except Exception as e:
+                self.log(f"  ⚠ Не удалось выдать права на {path}: {e}")
+
+        self.log("  Файлы скопированы")
+
+        # --- 6. CREATE DATABASE ... FOR ATTACH ---
+        conn_master = pyodbc.connect(self.conn_builder("master"), autocommit=True)
+        cur = conn_master.cursor()
 
         sql = (
             f"CREATE DATABASE [{self.sql_database}] ON "
-            f"(NAME = N'{self.sql_database}', FILENAME = '{mdf_path}'), "
-            f"(NAME = N'{self.sql_database}_log', FILENAME = '{ldf_path}')"
+            f"(FILENAME = '{dst_mdf}'), "
+            f"(FILENAME = '{dst_ldf}') "
+            f"FOR ATTACH"
         )
-        self.log(f"  Создаю: {mdf_path}")
+        self.log(f"  Привязываю базу к {dst_mdf}")
         cur.execute(sql)
-        conn.close()
+        time.sleep(1)
+
+        # Снимаем READ_ONLY (LocalDB иногда привязывает базы как read-only)
+        try:
+            cur.execute(f"ALTER DATABASE [{self.sql_database}] SET READ_WRITE")
+            self.log("  База переведена в режим READ_WRITE")
+        except Exception as e:
+            self.log(f"  ⚠ Не удалось снять read-only: {e}")
+
+        conn_master.close()
+
+        # --- 7. Удаляем исходные файлы ---
+        try:
+            os.remove(src_mdf)
+            os.remove(src_ldf)
+            self.log("  Исходные файлы удалены")
+        except Exception as e:
+            self.log(f"  ⚠ Не удалось удалить исходные файлы: {e}")
+
+        self.log(f"  ✅ База готова, файлы в {self.target_dir}")
+
+    # -----------------------------------------------------
 
     def _access_conn(self, mdb_path: str):
         conn_str = (
@@ -191,6 +301,8 @@ class Migrator:
             tables.append(name)
         conn.close()
         return sorted(tables)
+
+    # -----------------------------------------------------
 
     def _migrate_table(self, mdb_path: str, table: str):
         acc_conn = self._access_conn(mdb_path)
@@ -240,6 +352,7 @@ class Migrator:
             sql_cur.execute(f"SET IDENTITY_INSERT {quote(table)} ON")
 
         inserted = 0
+        skipped = 0
         for i, row in enumerate(rows, 1):
             values = []
             for v in row:
@@ -251,8 +364,15 @@ class Migrator:
                     values.append(v)
                 else:
                     values.append(str(v))
-            sql_cur.execute(insert_sql, values)
-            inserted += 1
+            try:
+                sql_cur.execute(insert_sql, values)
+                inserted += 1
+            except pyodbc.IntegrityError as e:
+                # Дубликат ключа или другая проблема целостности
+                skipped += 1
+                self.log(f"      ⚠ Строка {i} пропущена: {str(e)[:120]}")
+                sql_conn.rollback()
+                continue
             if i % 500 == 0:
                 sql_conn.commit()
 
@@ -262,7 +382,10 @@ class Migrator:
             sql_cur.execute(f"SET IDENTITY_INSERT {quote(table)} OFF")
             sql_conn.commit()
 
-        self.log(f"      {table}: {inserted} строк")
+        if skipped:
+            self.log(f"      {table}: {inserted} строк (пропущено {skipped} дубликатов)")
+        else:
+            self.log(f"      {table}: {inserted} строк")
 
         sql_conn.close()
         acc_conn.close()
