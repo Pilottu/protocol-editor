@@ -374,13 +374,21 @@ class Migrator:
                 sql_conn.rollback()
                 continue
             if i % 500 == 0:
+                
                 sql_conn.commit()
-
-        sql_conn.commit()
 
         if identity_col:
             sql_cur.execute(f"SET IDENTITY_INSERT {quote(table)} OFF")
             sql_conn.commit()
+
+            # Пересчёт счётчика IDENTITY по текущему максимуму,
+            # иначе SCOPE_IDENTITY() вернёт NULL при следующей вставке
+            try:
+                sql_cur.execute(f"DBCC CHECKIDENT ('{table}', RESEED)")
+                sql_conn.commit()
+                self.log(f"      {table}: счётчик IDENTITY пересчитан")
+            except Exception as e:
+                self.log(f"      {table}: ⚠ не удалось пересчитать IDENTITY: {e}")
 
         if skipped:
             self.log(f"      {table}: {inserted} строк (пропущено {skipped} дубликатов)")
