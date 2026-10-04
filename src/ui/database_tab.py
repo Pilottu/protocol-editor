@@ -75,9 +75,10 @@ class MigrationThread(QThread):
     progress = pyqtSignal(int)
     finished = pyqtSignal(bool, str)
 
-    def __init__(self, data_dir: str, server: str, database: str):
+    def __init__(self, source_dir: str, target_dir: str, server: str, database: str):
         super().__init__()
-        self.data_dir = data_dir
+        self.source_dir = source_dir
+        self.target_dir = target_dir
         self.server = server
         self.database = database
 
@@ -91,7 +92,7 @@ class MigrationThread(QThread):
                 "password": "",
                 "encrypt": "no",
                 "trust_cert": "yes",
-                "backup_dir": self.data_dir,
+                "backup_dir": self.source_dir,
             }
 
             def conn_builder(db_name):
@@ -100,7 +101,8 @@ class MigrationThread(QThread):
                 return build_connection_string(c)
 
             migrator = Migrator(
-                data_dir=self.data_dir,
+                source_dir=self.source_dir,
+                target_dir=self.target_dir,
                 sql_server=self.server,
                 sql_database=self.database,
                 sql_conn_str_builder=conn_builder,
@@ -669,25 +671,33 @@ class DatabaseTab(QWidget):
     # --- Миграция ---
 
     def on_migrate(self):
-        data_dir = os.path.normpath(self.data_dir_edit.text().strip())
-        if not os.path.isdir(data_dir):
-            QMessageBox.warning(self, "Ошибка", f"Папка не существует:\n{data_dir}")
+        source_dir = os.path.normpath(self.data_dir_edit.text().strip())
+        if not os.path.isdir(source_dir):
+            QMessageBox.warning(self, "Ошибка", f"Папка с .mdb не существует:\n{source_dir}")
             return
+
+        # Папка данных программы — куда кладём .mdf/.ldf
+        target_dir = os.path.normpath(get_app_dir() + r"\data")
+        os.makedirs(target_dir, exist_ok=True)
+
         server = self.server_combo.currentText().strip()
         database = self.db_edit.text().strip() or "ProtocolDB"
+
         ans = QMessageBox.question(
             self, "Миграция",
             f"Мигрировать в базу '{database}'?\n\n"
-            f"Сервер: {server}\nПапка: {data_dir}\n\n"
+            f"Источник (.mdb): {source_dir}\n"
+            f"Файлы базы: {target_dir}\n\n"
             f"Внимание: база будет пересоздана!",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
         )
         if ans != QMessageBox.StandardButton.Yes:
             return
+
         self.migr_progress.setValue(0)
         self.migr_log.clear()
         self.btn_migrate.setEnabled(False)
-        self.migr_thread = MigrationThread(data_dir, server, database)
+        self.migr_thread = MigrationThread(source_dir, target_dir, server, database)
         self.migr_thread.log.connect(self._on_migr_log)
         self.migr_thread.progress.connect(self.migr_progress.setValue)
         self.migr_thread.finished.connect(self._on_migr_finished)

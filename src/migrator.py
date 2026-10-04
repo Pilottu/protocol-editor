@@ -1,8 +1,12 @@
 """
 Миграция Access (.mdb) → SQL Server (LocalDB или обычный).
+
+Источник (.mdb) — папка source_dir.
+Целевые файлы (.mdf/.ldf) — папка target_dir (обычно Program Files/.../data).
 """
 
 import os
+import time
 import pyodbc
 from datetime import datetime
 from typing import Callable, Optional
@@ -64,33 +68,32 @@ def quote(name: str) -> str:
 class Migrator:
     def __init__(
         self,
-        data_dir: str,
+        source_dir: str,
+        target_dir: str,
         sql_server: str,
         sql_database: str,
         sql_conn_str_builder: Callable[[str], str],
         log: Optional[Callable[[str], None]] = None,
         progress: Optional[Callable[[int], None]] = None,
     ):
-        self.data_dir = data_dir
+        self.source_dir = os.path.normpath(source_dir)
+        self.target_dir = os.path.normpath(target_dir)
         self.sql_server = sql_server
         self.sql_database = sql_database
         self.conn_builder = sql_conn_str_builder
         self.log = log or (lambda msg: None)
         self.progress = progress or (lambda p: None)
 
-    # -----------------------------------------------------
-
     def run(self):
-        self.data_dir = os.path.normpath(self.data_dir)
         self.log("=== Начало миграции ===")
         self.progress(0)
 
-        if not os.path.isdir(self.data_dir):
-            raise RuntimeError(f"Папка не найдена: {self.data_dir}")
+        if not os.path.isdir(self.source_dir):
+            raise RuntimeError(f"Папка с .mdb не найдена: {self.source_dir}")
 
         mdb_paths = []
         for name in MDB_FILES:
-            path = os.path.join(self.data_dir, name)
+            path = os.path.join(self.source_dir, name)
             if os.path.exists(path):
                 mdb_paths.append(path)
                 self.log(f"Найден: {path}")
@@ -123,10 +126,7 @@ class Migrator:
         self.progress(100)
         self.log("=== Миграция завершена ===")
 
-    # -----------------------------------------------------
-
     def _create_database(self):
-        """Создаёт (или пересоздаёт) базу данных в LocalDB/SQL Server."""
         self.log(f"Создание базы '{self.sql_database}'...")
         cfg_master = self.conn_builder("master")
         conn = pyodbc.connect(cfg_master, autocommit=True)
@@ -135,22 +135,35 @@ class Migrator:
         cur.execute("SELECT name FROM sys.databases WHERE name = ?", self.sql_database)
         if cur.fetchone():
             self.log(f"  База '{self.sql_database}' существует — удаляю")
-            cur.execute(
-                f"ALTER DATABASE [{self.sql_database}] SET SINGLE_USER WITH ROLLBACK IMMEDIATE"
-            )
-            cur.execute(f"DROP DATABASE [{self.sql_database}]")
+            try:
+                cur.execute(
+                    f"ALTER DATABASE [{self.sql_database}] "
+                    f"SET SINGLE_USER WITH ROLLBACK IMMEDIATE"
+                )
+                cur.execute(f"DROP DATABASE [{self.sql_database}]")
+                self.log("  База удалена")
+            except Exception as e:
+                self.log(f"  Предупреждение при DROP: {e}")
 
-        mdf_path = os.path.normpath(os.path.join(self.data_dir, f"{self.sql_database}.mdf"))
-        ldf_path = os.path.normpath(os.path.join(self.data_dir, f"{self.sql_database}_log.ldf"))
+        time.sleep(2)
+
+        os.makedirs(self.target_dir, exist_ok=True)
+
+        mdf_path = os.path.normpath(
+            os.path.join(self.target_dir, f"{self.sql_database}.mdf")
+        )
+        ldf_path = os.path.normpath(
+            os.path.join(self.target_dir, f"{self.sql_database}_log.ldf")
+        )
 
         for p in (mdf_path, ldf_path):
             if os.path.exists(p):
                 try:
                     os.remove(p)
-                except Exception:
-                    pass
+                    self.log(f"  Удалён файл: {p}")
+                except Exception as e:
+                    raise RuntimeError(f"Файл занят или недоступен: {p}\n{e}")
 
-        # ← ИСПРАВЛЕНО: явное NAME для каждого файла
         sql = (
             f"CREATE DATABASE [{self.sql_database}] ON "
             f"(NAME = N'{self.sql_database}', FILENAME = '{mdf_path}'), "
@@ -159,8 +172,6 @@ class Migrator:
         self.log(f"  Создаю: {mdf_path}")
         cur.execute(sql)
         conn.close()
-
-    # -----------------------------------------------------
 
     def _access_conn(self, mdb_path: str):
         conn_str = (
@@ -180,8 +191,6 @@ class Migrator:
             tables.append(name)
         conn.close()
         return sorted(tables)
-
-    # -----------------------------------------------------
 
     def _migrate_table(self, mdb_path: str, table: str):
         acc_conn = self._access_conn(mdb_path)
