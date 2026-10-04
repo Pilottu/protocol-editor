@@ -1,13 +1,14 @@
 import sys
+import datetime
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QSplitter, QTreeView, QTabWidget, QFormLayout, QLineEdit,
     QComboBox, QDateEdit, QTextEdit, QPushButton, QLabel,
     QToolBar, QMessageBox, QListWidget, QListWidgetItem,
-    QGroupBox, QCheckBox
+    QGroupBox, QCheckBox, QInputDialog, QTimeEdit
 )
 from PyQt6.QtGui import QStandardItemModel, QStandardItem, QAction
-from PyQt6.QtCore import Qt, QDate
+from PyQt6.QtCore import Qt, QDate, QTime
 
 sys.path.insert(0, r"E:\Prog\Piton\src")
 from db import (
@@ -18,7 +19,22 @@ from db import (
     get_vrachi,
     get_vrach_types,
     get_anestezia_types,
+    get_distinct_zakluchenia,
+    get_next_protocol_nomer,
     reload_config,
+    update_patsient,
+    insert_patsient,
+    update_protocol,
+    insert_protocol,
+    delete_protocol,
+    insert_zakluchenie,
+    update_zakluchenie,
+    delete_zakluchenie,
+    insert_vrach,
+    delete_vrach,
+    insert_vrach_type_if_missing,
+    update_vrach_type,
+    get_connection,
 )
 
 
@@ -28,16 +44,14 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Редактор протоколов (Python)")
         self.resize(1600, 900)
 
-        # --- Данные ---
         self.references = {}
         self.current_protocol_id = None
         self.current_patient_id = None
+        self.current_napravlenie_id = None
         self.is_connected = False
 
-        # --- Панель инструментов ---
         self._build_toolbar()
 
-        # --- Центральный виджет ---
         central = QWidget()
         self.setCentralWidget(central)
         layout = QVBoxLayout(central)
@@ -45,7 +59,7 @@ class MainWindow(QMainWindow):
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
 
-        # --- Левая панель: дерево ---
+        # --- Дерево ---
         self.tree = QTreeView()
         self.tree_model = QStandardItemModel()
         self.tree_model.setHorizontalHeaderLabels(["Исследование / Пациент / Протокол"])
@@ -59,7 +73,7 @@ class MainWindow(QMainWindow):
         right_layout = QVBoxLayout(right_panel)
         right_layout.setContentsMargins(0, 0, 0, 0)
 
-        # Верхняя часть
+        # Верхняя часть формы
         top_form = QFormLayout()
         self.issledovanie_combo = QComboBox()
         self.fio_edit = QLineEdit()
@@ -74,24 +88,57 @@ class MainWindow(QMainWindow):
         top_form.addRow("Группа", self.gruppa_combo)
         right_layout.addLayout(top_form)
 
-        # Кнопки управления
-        btn_layout = QHBoxLayout()
-        self.btn_save = QPushButton("Сохранить изменения")
-        self.btn_add = QPushButton("Добавить")
-        self.btn_new_protocol = QPushButton("Новый протокол")
-        self.btn_find = QPushButton("Найти")
-        self.btn_delete = QPushButton("Удалить")
-        for b in [self.btn_save, self.btn_add, self.btn_new_protocol,
-                  self.btn_find, self.btn_delete]:
-            btn_layout.addWidget(b)
-        right_layout.addLayout(btn_layout)
+        self.fio_edit.textChanged.connect(self.on_fio_changed)
 
-        # Вкладки Шапка / Текст
+        # --- Вкладки ---
         self.tabs = QTabWidget()
 
-        # --- Вкладка "Шапка" ---
-        shapka_widget = QWidget()
-        shapka_layout = QFormLayout(shapka_widget)
+        # Вкладка «Шапка»
+        shapka_widget = self._build_shapka_tab()
+        self.tabs.addTab(shapka_widget, "Шапка")
+
+        # Вкладка «Текст»
+        text_widget = self._build_text_tab()
+        self.tabs.addTab(text_widget, "Текст")
+
+        # Вкладка «Рез. патологогистологического исслед.»
+        patolog_widget = self._build_patolog_tab()
+        self.tabs.addTab(patolog_widget, "Рез. патологогистологического исслед.")
+        self.patolog_tab_index = self.tabs.count() - 1
+        self.tabs.setTabVisible(self.patolog_tab_index, False)
+
+        right_layout.addWidget(self.tabs, stretch=1)
+
+        # --- Общие кнопки под табами (для всех вкладок) ---
+        proto_btn_layout = QHBoxLayout()
+        self.btn_save_proto = QPushButton("Сохранить изменения")
+        self.btn_add_proto = QPushButton("Добавить протокол")
+        self.btn_del_proto = QPushButton("Удалить протокол")
+        for b in [self.btn_save_proto, self.btn_add_proto, self.btn_del_proto]:
+            proto_btn_layout.addWidget(b)
+        right_layout.addLayout(proto_btn_layout)
+
+        self.btn_save_proto.clicked.connect(self.on_save_changes)
+        self.btn_add_proto.clicked.connect(self.on_add_protocol)
+        self.btn_del_proto.clicked.connect(self.on_delete_protocol)
+
+        splitter.addWidget(right_panel)
+        splitter.setSizes([500, 1100])
+        layout.addWidget(splitter)
+
+        # Статус-бар
+        self.status_label = QLabel("Проверка соединения...")
+        self.statusBar().addPermanentWidget(self.status_label)
+
+        self._try_connect()
+        self._update_ui_state()
+
+    # =========================================================
+    #  Построение вкладок
+    # =========================================================
+    def _build_shapka_tab(self) -> QWidget:
+        w = QWidget()
+        form = QFormLayout(w)
 
         self.organizatsia_edit = QLineEdit()
         self.otdelenie_edit = QLineEdit()
@@ -111,21 +158,23 @@ class MainWindow(QMainWindow):
         self.apparat_combo = QComboBox()
         self.anestezia_combo = QComboBox()
 
-        shapka_layout.addRow("Организация", self.organizatsia_edit)
-        shapka_layout.addRow("Отделение организации", self.otdelenie_edit)
-        shapka_layout.addRow("Исследование", self.issledovanie_edit)
-        shapka_layout.addRow("Протокол №", self.nomer_edit)
-        shapka_layout.addRow("Дата", self.date_edit)
-        shapka_layout.addRow("Ф.И.О.", self.fio_shapka_edit)
-        shapka_layout.addRow("Возраст", self.vozrast_edit)
-        shapka_layout.addRow("Пол", self.pol_shapka_edit)
-        shapka_layout.addRow("Адрес", self.adres_edit)
-        shapka_layout.addRow("Амб. карта №", self.karta_shapka_edit)
-        shapka_layout.addRow("История болезни №", self.istor_edit)
-        shapka_layout.addRow("Отделение (подраздел.)", self.otdelenie_podr_combo)
-        shapka_layout.addRow("Анамнез", self.anamnez_edit)
-        shapka_layout.addRow("Модель аппарата", self.apparat_combo)
-        shapka_layout.addRow("Анестезия", self.anestezia_combo)
+        form.addRow("Организация", self.organizatsia_edit)
+        form.addRow("Отделение организации", self.otdelenie_edit)
+        form.addRow("Исследование", self.issledovanie_edit)
+        form.addRow("Протокол №", self.nomer_edit)
+        form.addRow("Дата", self.date_edit)
+        form.addRow("Ф.И.О.", self.fio_shapka_edit)
+        form.addRow("Возраст", self.vozrast_edit)
+        form.addRow("Пол", self.pol_shapka_edit)
+        form.addRow("Адрес", self.adres_edit)
+        form.addRow("Амб. карта №", self.karta_shapka_edit)
+        form.addRow("История болезни №", self.istor_edit)
+        form.addRow("Отделение (подраздел.)", self.otdelenie_podr_combo)
+        form.addRow("Анамнез", self.anamnez_edit)
+        form.addRow("Модель аппарата", self.apparat_combo)
+        form.addRow("Анестезия", self.anestezia_combo)
+
+        self.nomer_edit.textChanged.connect(self.on_nomer_changed)
 
         flags_layout = QHBoxLayout()
         self.chk_biopsia = QCheckBox("Биопсия")
@@ -140,19 +189,24 @@ class MainWindow(QMainWindow):
                     self.chk_sanats, self.chk_lecheb, self.chk_intub,
                     self.chk_phmetr, self.chk_smiv]:
             flags_layout.addWidget(chk)
-        shapka_layout.addRow("Флаги", flags_layout)
+        form.addRow("Флаги", flags_layout)
 
-        self.tabs.addTab(shapka_widget, "Шапка")
+        # Показ вкладки «Рез. патологогистологического исслед.» по галкам
+        for chk in (self.chk_biopsia, self.chk_tsitologia, self.chk_gistologia):
+            chk.stateChanged.connect(self._on_biopsia_flags_changed)
 
-        # --- Вкладка "Текст" ---
-        text_widget = QWidget()
-        text_layout = QVBoxLayout(text_widget)
+        return w
+
+    def _build_text_tab(self) -> QWidget:
+        w = QWidget()
+        layout = QVBoxLayout(w)
 
         self.protocol_text = QTextEdit()
         self.protocol_text.setPlaceholderText("Текст протокола...")
-        text_layout.addWidget(QLabel("Текст протокола:"))
-        text_layout.addWidget(self.protocol_text, stretch=3)
+        layout.addWidget(QLabel("Текст протокола:"))
+        layout.addWidget(self.protocol_text, stretch=3)
 
+        # Заключения
         zakl_group = QGroupBox("Заключение")
         zakl_layout = QHBoxLayout(zakl_group)
         self.zakl_list = QListWidget()
@@ -165,13 +219,15 @@ class MainWindow(QMainWindow):
         zakl_btn_layout.addStretch()
         zakl_layout.addWidget(self.zakl_list, stretch=1)
         zakl_layout.addLayout(zakl_btn_layout)
-        text_layout.addWidget(zakl_group, stretch=1)
+        layout.addWidget(zakl_group, stretch=1)
 
+        # Врачи
         vrach_group = QGroupBox("Врач")
         vrach_layout = QHBoxLayout(vrach_group)
         self.vrach_list = QListWidget()
         vrach_btn_layout = QVBoxLayout()
         self.vrach_combo = QComboBox()
+        self.vrach_combo.setEditable(True)
         self.btn_vrach_add = QPushButton("Добавить")
         self.btn_vrach_edit = QPushButton("Изменить")
         self.btn_vrach_del = QPushButton("Удалить")
@@ -181,32 +237,76 @@ class MainWindow(QMainWindow):
         vrach_btn_layout.addStretch()
         vrach_layout.addWidget(self.vrach_list, stretch=1)
         vrach_layout.addLayout(vrach_btn_layout)
-        text_layout.addWidget(vrach_group, stretch=1)
+        layout.addWidget(vrach_group, stretch=1)
 
-        proto_btn_layout = QHBoxLayout()
-        self.btn_save_proto = QPushButton("Сохранить изменения")
-        self.btn_add_proto = QPushButton("Добавить протокол")
-        self.btn_del_proto = QPushButton("Удалить протокол")
-        for b in [self.btn_save_proto, self.btn_add_proto, self.btn_del_proto]:
-            proto_btn_layout.addWidget(b)
-        text_layout.addLayout(proto_btn_layout)
+        self.btn_zakl_add.clicked.connect(self.on_zakl_add)
+        self.btn_zakl_edit.clicked.connect(self.on_zakl_edit)
+        self.btn_zakl_del.clicked.connect(self.on_zakl_del)
 
-        self.tabs.addTab(text_widget, "Текст")
+        self.btn_vrach_add.clicked.connect(self.on_vrach_add)
+        self.btn_vrach_edit.clicked.connect(self.on_vrach_edit)
+        self.btn_vrach_del.clicked.connect(self.on_vrach_del)
 
-        right_layout.addWidget(self.tabs, stretch=1)
-        splitter.addWidget(right_panel)
+        return w
 
-        splitter.setSizes([500, 1100])
-        layout.addWidget(splitter)
+    def _build_patolog_tab(self) -> QWidget:
+        w = QWidget()
+        form = QFormLayout(w)
 
-        # --- Статус-бар ---
-        self.status_label = QLabel("Проверка соединения...")
-        self.statusBar().addPermanentWidget(self.status_label)
+        self.patolog_nomer = QLineEdit()
+        self.patolog_result_nomer = QLineEdit()
+        self.patolog_date_in = QDateEdit()
+        self.patolog_date_in.setCalendarPopup(True)
+        self.patolog_date_in.setDate(QDate.currentDate())
+        self.patolog_time_in = QTimeEdit()
+        self.patolog_time_in.setDisplayFormat("HH:mm:ss")
+        self.patolog_time_in.setTime(QTime(0, 0, 0))
+        self.patolog_biopsia_diag = QLineEdit()
+        self.patolog_biopsia_sroch = QLineEdit()
+        self.patolog_oper_material = QLineEdit()
+        self.patolog_kusochki1 = QLineEdit()
+        self.patolog_kusochki2 = QLineEdit()
+        self.patolog_methodika = QLineEdit()
+        self.patolog_opisanie = QTextEdit()
+        self.patolog_zakluchenie = QTextEdit()
+        self.patolog_kod = QLineEdit()
+        self.patolog_date_result = QDateEdit()
+        self.patolog_date_result.setCalendarPopup(True)
+        self.patolog_date_result.setDate(QDate.currentDate())
+        self.patolog_patologoanatom = QLineEdit()
+        self.patolog_laborant = QLineEdit()
 
-        # --- Пробуем подключиться к базе (не критично для запуска) ---
-        self._try_connect()
+        form.addRow("Номер", self.patolog_nomer)
+        form.addRow("ResultNomer", self.patolog_result_nomer)
+        form.addRow("Дата поступления", self.patolog_date_in)
+        form.addRow("Часы поступления", self.patolog_time_in)
+        form.addRow("Биопсия диагностическая", self.patolog_biopsia_diag)
+        form.addRow("Биопсия срочная", self.patolog_biopsia_sroch)
+        form.addRow("Операционный материал", self.patolog_oper_material)
+        form.addRow("Количество кусочков (1)", self.patolog_kusochki1)
+        form.addRow("Количество кусочков (2)", self.patolog_kusochki2)
+        form.addRow("Методика окраски", self.patolog_methodika)
+        form.addRow("Описание", self.patolog_opisanie)
+        form.addRow("Заключение", self.patolog_zakluchenie)
+        form.addRow("Код", self.patolog_kod)
+        form.addRow("Дата результата", self.patolog_date_result)
+        form.addRow("Патологоанатом", self.patolog_patologoanatom)
+        form.addRow("Лаборант", self.patolog_laborant)
 
-    # --- Панель инструментов ---
+        return w
+
+    # =========================================================
+    #  Показ/скрытие вкладки по флагам биопсии
+    # =========================================================
+    def _on_biopsia_flags_changed(self, _state=None):
+        any_flag = (self.chk_biopsia.isChecked() or
+                    self.chk_tsitologia.isChecked() or
+                    self.chk_gistologia.isChecked())
+        self.tabs.setTabVisible(self.patolog_tab_index, any_flag)
+
+    # =========================================================
+    #  Панель инструментов
+    # =========================================================
     def _build_toolbar(self):
         tb = QToolBar("Основная")
         self.addToolBar(tb)
@@ -226,9 +326,10 @@ class MainWindow(QMainWindow):
             act.triggered.connect(handler)
             tb.addAction(act)
 
-    # --- Подключение ---
+    # =========================================================
+    #  Подключение
+    # =========================================================
     def _try_connect(self):
-        """Пытается подключиться к базе. Если не удаётся — программа продолжает работать."""
         try:
             self.references = get_references()
             self.is_connected = True
@@ -244,12 +345,10 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(
                 self, "Нет соединения",
                 f"Не удалось подключиться к базе данных:\n{e}\n\n"
-                f"Откройте «Настройки» → «База данных», "
-                f"проверьте параметры и сохраните."
+                f"Откройте «Настройки» → «База данных»."
             )
 
     def _clear_ui(self):
-        """Очищает UI, когда нет соединения."""
         self.tree_model.clear()
         self.tree_model.setHorizontalHeaderLabels(["Исследование / Пациент / Протокол"])
         self.issledovanie_combo.clear()
@@ -263,11 +362,12 @@ class MainWindow(QMainWindow):
         self.protocol_text.clear()
 
     def on_reconnect(self):
-        """Кнопка «Переподключиться» на панели инструментов."""
         reload_config()
         self._try_connect()
 
-    # --- Загрузка справочников ---
+    # =========================================================
+    #  Справочники
+    # =========================================================
     def _load_references(self):
         refs = self.references
 
@@ -291,23 +391,33 @@ class MainWindow(QMainWindow):
         for id_, name in refs.get("Otdelenie", []):
             self.otdelenie_podr_combo.addItem(name, id_)
 
+        current_vrach = self.vrach_combo.currentText() if hasattr(self, "vrach_combo") else ""
         self.vrach_combo.clear()
+        self.vrach_combo.setEditable(True)
         self.vrach_combo.addItem("", None)
         try:
             for id_, fio in get_vrach_types():
                 self.vrach_combo.addItem(fio, id_)
         except Exception:
             pass
+        if current_vrach:
+            self.vrach_combo.setCurrentText(current_vrach)
 
+        current_anest = self.anestezia_combo.currentText() if hasattr(self, "anestezia_combo") else ""
         self.anestezia_combo.clear()
+        self.anestezia_combo.setEditable(True)
         self.anestezia_combo.addItem("", None)
         try:
             for name in get_anestezia_types():
                 self.anestezia_combo.addItem(name, name)
         except Exception:
             pass
+        if current_anest:
+            self.anestezia_combo.setCurrentText(current_anest)
 
-    # --- Загрузка дерева ---
+    # =========================================================
+    #  Дерево
+    # =========================================================
     def _load_tree(self):
         self.tree_model.clear()
         self.tree_model.setHorizontalHeaderLabels(["Исследование / Пациент / Протокол"])
@@ -351,7 +461,76 @@ class MainWindow(QMainWindow):
         )
         self.status_label.setStyleSheet("color: green;")
 
-    # --- Обработчики ---
+    def _reload_tree(self):
+        current = self.current_protocol_id
+        self._load_tree()
+        if current:
+            self._select_protocol_in_tree(current)
+
+    def _select_protocol_in_tree(self, protocol_id: int):
+        for i in range(self.tree_model.rowCount()):
+            iss_item = self.tree_model.item(i)
+            for j in range(iss_item.rowCount()):
+                pat_item = iss_item.child(j)
+                for k in range(pat_item.rowCount()):
+                    proto_item = pat_item.child(k)
+                    data = proto_item.data(Qt.ItemDataRole.UserRole)
+                    if data and data.get("id") == protocol_id:
+                        idx = self.tree_model.indexFromItem(proto_item)
+                        self.tree.setCurrentIndex(idx)
+                        self.tree.scrollTo(idx)
+                        return
+
+    # =========================================================
+    #  Живой поиск
+    # =========================================================
+    def on_fio_changed(self, text: str):
+        self._update_ui_state()
+        text = text.strip().lower()
+        if not text or not self.is_connected:
+            return
+        for i in range(self.tree_model.rowCount()):
+            iss_item = self.tree_model.item(i)
+            for j in range(iss_item.rowCount()):
+                pat_item = iss_item.child(j)
+                if pat_item.text().lower().startswith(text):
+                    idx = self.tree_model.indexFromItem(pat_item)
+                    self.tree.setCurrentIndex(idx)
+                    self.tree.scrollTo(idx)
+                    self.tree.expand(idx.parent())
+                    return
+
+    def on_nomer_changed(self, text: str):
+        text = text.strip()
+        if not text or not self.is_connected:
+            return
+        for i in range(self.tree_model.rowCount()):
+            iss_item = self.tree_model.item(i)
+            for j in range(iss_item.rowCount()):
+                pat_item = iss_item.child(j)
+                for k in range(pat_item.rowCount()):
+                    proto_item = pat_item.child(k)
+                    data = proto_item.data(Qt.ItemDataRole.UserRole)
+                    if data and str(data.get("nomer", "")).startswith(text):
+                        idx = self.tree_model.indexFromItem(proto_item)
+                        self.tree.setCurrentIndex(idx)
+                        self.tree.scrollTo(idx)
+                        return
+
+    def _set_fio_silent(self, text: str):
+        self.fio_edit.blockSignals(True)
+        self.fio_edit.setText(text or "")
+        self.fio_edit.blockSignals(False)
+        self._update_ui_state()
+
+    def _set_nomer_silent(self, text: str):
+        self.nomer_edit.blockSignals(True)
+        self.nomer_edit.setText(text or "")
+        self.nomer_edit.blockSignals(False)
+
+    # =========================================================
+    #  Обработчики дерева
+    # =========================================================
     def on_tree_click(self, index):
         if not self.is_connected:
             return
@@ -364,10 +543,22 @@ class MainWindow(QMainWindow):
 
         if data.get("type") == "protocol":
             self.current_protocol_id = data["id"]
-            self.statusBar().showMessage(f"Выбран протокол: {item.text()}")
             self._load_protocol(data["id"])
+            self._update_ui_state()
         elif data.get("type") == "patsient":
-            self.statusBar().showMessage(f"Выбран пациент: {item.text()}")
+            self.current_patient_id = data["id"]
+            self.current_protocol_id = None
+
+            parent_item = item.parent()
+            if parent_item:
+                parent_data = parent_item.data(Qt.ItemDataRole.UserRole)
+                if parent_data and parent_data.get("type") == "issledovanie":
+                    iss_id = parent_data.get("id")
+                    for i in range(self.issledovanie_combo.count()):
+                        if self.issledovanie_combo.itemData(i) == iss_id:
+                            self.issledovanie_combo.setCurrentIndex(i)
+                            break
+            self._update_ui_state()
         elif data.get("type") == "issledovanie":
             self.statusBar().showMessage(f"Выбрано исследование: {item.text()}")
 
@@ -382,8 +573,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Ошибка", f"Протокол {protocol_id} не найден")
             return
 
-        # Верхняя часть
-        self.fio_edit.setText(proto.get("PatsientFIO") or "")
+        self._set_fio_silent(proto.get("PatsientFIO") or "")
         pol = proto.get("PatsientPol") or ""
         idx = self.pol_combo.findText(pol)
         self.pol_combo.setCurrentIndex(idx if idx >= 0 else 0)
@@ -403,11 +593,10 @@ class MainWindow(QMainWindow):
                     self.issledovanie_combo.setCurrentIndex(i)
                     break
 
-        # Шапка
         self.organizatsia_edit.setText(proto.get("OrganizatsiaName") or "")
         self.otdelenie_edit.setText(proto.get("OtdelenieName") or "")
         self.issledovanie_edit.setText(proto.get("IssledovanieName") or "")
-        self.nomer_edit.setText(str(proto.get("Nomer") or ""))
+        self._set_nomer_silent(str(proto.get("Nomer") or ""))
         if proto.get("ProtocolDate"):
             d = proto["ProtocolDate"]
             self.date_edit.setDate(QDate(d.year, d.month, d.day))
@@ -427,8 +616,7 @@ class MainWindow(QMainWindow):
                     break
 
         anest = proto.get("Anestezia") or ""
-        idx = self.anestezia_combo.findText(anest)
-        self.anestezia_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self.anestezia_combo.setCurrentText(anest)
 
         otd_id = proto.get("OtdelenieID")
         if otd_id:
@@ -437,7 +625,6 @@ class MainWindow(QMainWindow):
                     self.otdelenie_podr_combo.setCurrentIndex(i)
                     break
 
-        # Флаги
         self.chk_biopsia.setChecked(proto.get("Biopsia") == "да")
         self.chk_tsitologia.setChecked(proto.get("Tsitologia") == "да")
         self.chk_gistologia.setChecked(proto.get("Gistologia") == "да")
@@ -447,10 +634,10 @@ class MainWindow(QMainWindow):
         self.chk_phmetr.setChecked(proto.get("PHMetr") == "да")
         self.chk_smiv.setChecked(proto.get("Smiv") == "да")
 
-        # Текст
+        self._on_biopsia_flags_changed()
+
         self.protocol_text.setPlainText(proto.get("ProtocolText") or "")
 
-        # Заключения
         self.zakl_list.clear()
         try:
             for z in get_zakluchenia(protocol_id):
@@ -460,7 +647,6 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
-        # Врачи
         self.vrach_list.clear()
         try:
             for v in get_vrachi(protocol_id):
@@ -470,7 +656,476 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
-    # --- Кнопки панели инструментов ---
+        self.current_patient_id = proto.get("PatsientID")
+
+        # Загружаем направление, если есть
+        self._load_napravlenie(protocol_id)
+
+    # =========================================================
+    #  Направление (патологогистология)
+    # =========================================================
+    def _load_napravlenie(self, protocol_id: int):
+        """Загружает первую запись Napravlenie для протокола (если есть)."""
+        self.current_napravlenie_id = None
+        # Очистка полей
+        for w in [self.patolog_nomer, self.patolog_result_nomer,
+                  self.patolog_biopsia_diag, self.patolog_biopsia_sroch,
+                  self.patolog_oper_material, self.patolog_kusochki1,
+                  self.patolog_kusochki2, self.patolog_methodika,
+                  self.patolog_kod, self.patolog_patologoanatom,
+                  self.patolog_laborant]:
+            w.clear()
+        self.patolog_opisanie.clear()
+        self.patolog_zakluchenie.clear()
+
+        try:
+            with get_connection() as conn:
+                cur = conn.cursor()
+                cur.execute(
+                    "SELECT TOP 1 * FROM Napravlenie WHERE ProtocolID = ? ORDER BY NapravlenieID",
+                    [protocol_id]
+                )
+                row = cur.fetchone()
+                if not row:
+                    return
+                cols = [d[0] for d in cur.description]
+                data = dict(zip(cols, row))
+        except Exception:
+            return
+
+        self.current_napravlenie_id = data.get("NapravlenieID")
+        self.patolog_nomer.setText(str(data.get("NapravlenieID") or ""))
+        self.patolog_result_nomer.setText(str(data.get("ResultNomer") or ""))
+        if data.get("InDate"):
+            d = data["InDate"]
+            self.patolog_date_in.setDate(QDate(d.year, d.month, d.day))
+        self.patolog_biopsia_diag.setText(str(data.get("BiopsiaDiadnostich") or ""))
+        self.patolog_biopsia_sroch.setText(str(data.get("BiopsiaSrochnaya") or ""))
+        self.patolog_oper_material.setText(str(data.get("OperatsMaterial") or ""))
+        self.patolog_kusochki1.setText(str(data.get("Kusochki1") or ""))
+        self.patolog_kusochki2.setText(str(data.get("Kusochki2") or ""))
+        self.patolog_methodika.setText(str(data.get("Methodika") or ""))
+        self.patolog_opisanie.setPlainText(str(data.get("ResultText") or ""))
+        self.patolog_zakluchenie.setPlainText(str(data.get("ZakluchenieText") or ""))
+        self.patolog_kod.setText(str(data.get("Kod") or ""))
+        if data.get("ResultDate"):
+            d = data["ResultDate"]
+            self.patolog_date_result.setDate(QDate(d.year, d.month, d.day))
+        self.patolog_patologoanatom.setText(str(data.get("FIOPatolAnatom") or ""))
+        self.patolog_laborant.setText(str(data.get("FIOLaborant") or ""))
+
+    def _save_napravlenie(self, protocol_id: int, issledovanie_id: int):
+        """Сохраняет (обновляет или создаёт) направление."""
+        # Если вкладка не видима и полей нет — не трогаем
+        if not self.tabs.isTabVisible(self.patolog_tab_index):
+            return
+        if (not self.patolog_result_nomer.text().strip() and
+                not self.patolog_opisanie.toPlainText().strip() and
+                not self.patolog_zakluchenie.toPlainText().strip() and
+                not self.patolog_kod.text().strip()):
+            return
+
+        d_in = self.patolog_date_in.date()
+        date_in = datetime.datetime(d_in.year(), d_in.month(), d_in.day())
+        t_in = self.patolog_time_in.time()
+        time_in = datetime.datetime(1899, 12, 30, t_in.hour(), t_in.minute(), t_in.second())
+
+        d_res = self.patolog_date_result.date()
+        date_res = datetime.datetime(d_res.year(), d_res.month(), d_res.day())
+
+        data = {
+            "ProtocolID": protocol_id,
+            "ResultNomer": self.patolog_result_nomer.text().strip(),
+            "InDate": date_in,
+            "InTime": time_in,
+            "ResultDate": date_res,
+            "ResultText": self.patolog_opisanie.toPlainText(),
+            "ZakluchenieText": self.patolog_zakluchenie.toPlainText(),
+            "BiopsiaDiadnostich": self.patolog_biopsia_diag.text().strip(),
+            "BiopsiaSrochnaya": self.patolog_biopsia_sroch.text().strip(),
+            "OperatsMaterial": self.patolog_oper_material.text().strip(),
+            "Kusochki1": self.patolog_kusochki1.text().strip(),
+            "Kusochki2": self.patolog_kusochki2.text().strip(),
+            "Methodika": self.patolog_methodika.text().strip(),
+            "Kod": self.patolog_kod.text().strip(),
+            "FIOPatolAnatom": self.patolog_patologoanatom.text().strip(),
+            "FIOLaborant": self.patolog_laborant.text().strip(),
+            "OrganizatsiaID": 1,
+            "IssledovanieID": issledovanie_id,
+        }
+
+        with get_connection() as conn:
+            cur = conn.cursor()
+            if self.current_napravlenie_id:
+                cur.execute("""
+                    UPDATE Napravlenie SET
+                        ResultNomer=?, InDate=?, InTime=?, ResultDate=?, ResultText=?,
+                        ZakluchenieText=?, BiopsiaDiadnostich=?, BiopsiaSrochnaya=?,
+                        OperatsMaterial=?, Kusochki1=?, Kusochki2=?, Methodika=?,
+                        Kod=?, FIOPatolAnatom=?, FIOLaborant=?, IssledovanieID=?
+                    WHERE NapravlenieID=?
+                """, [
+                    data["ResultNomer"], data["InDate"], data["InTime"], data["ResultDate"],
+                    data["ResultText"], data["ZakluchenieText"], data["BiopsiaDiadnostich"],
+                    data["BiopsiaSrochnaya"], data["OperatsMaterial"], data["Kusochki1"],
+                    data["Kusochki2"], data["Methodika"], data["Kod"], data["FIOPatolAnatom"],
+                    data["FIOLaborant"], data["IssledovanieID"], self.current_napravlenie_id
+                ])
+            else:
+                cur.execute("""
+                    INSERT INTO Napravlenie
+                        (NapravlenieTypeID, ProtocolID, ResultNomer, InDate, InTime,
+                         ResultDate, ResultText, ZakluchenieText, BiopsiaDiadnostich,
+                         BiopsiaSrochnaya, OperatsMaterial, Kusochki1, Kusochki2,
+                         Methodika, Kod, FIOPatolAnatom, FIOLaborant,
+                         OrganizatsiaID, IssledovanieID)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, [
+                    0, protocol_id, data["ResultNomer"], data["InDate"], data["InTime"],
+                    data["ResultDate"], data["ResultText"], data["ZakluchenieText"],
+                    data["BiopsiaDiadnostich"], data["BiopsiaSrochnaya"],
+                    data["OperatsMaterial"], data["Kusochki1"], data["Kusochki2"],
+                    data["Methodika"], data["Kod"], data["FIOPatolAnatom"],
+                    data["FIOLaborant"], data["OrganizatsiaID"], data["IssledovanieID"]
+                ])
+                cur.execute("SELECT @@IDENTITY")
+                self.current_napravlenie_id = int(cur.fetchone()[0])
+            conn.commit()
+
+    # =========================================================
+    #  Состояние UI
+    # =========================================================
+    def _update_ui_state(self):
+        has_fio = bool(self.fio_edit.text().strip())
+        has_protocol = self.current_protocol_id is not None
+
+        self.btn_save_proto.setEnabled(has_fio)
+        self.btn_add_proto.setEnabled(has_fio)
+        self.btn_del_proto.setEnabled(has_protocol)
+
+    # =========================================================
+    #  Вспомогательные методы
+    # =========================================================
+    @staticmethod
+    def _checkbox_to_str(chk) -> str:
+        return "да" if chk.isChecked() else "нет"
+
+    def _current_patsient_data(self) -> dict:
+        grp_id = self.gruppa_combo.currentData()
+        return {
+            "FIO": self.fio_edit.text().strip(),
+            "Pol": self.pol_combo.currentText(),
+            "Karta": self.karta_edit.text().strip() or "нет",
+            "PatsientGroupID": grp_id if grp_id else 1,
+            "OrganizatsiaID": 1,
+        }
+
+    def _current_protocol_data(self, patsient_id: int) -> dict:
+        iss_id = self.issledovanie_combo.currentData()
+        app_id = self.apparat_combo.currentData()
+        otd_id = self.otdelenie_podr_combo.currentData()
+
+        d = self.date_edit.date()
+        protocol_date = datetime.datetime(d.year(), d.month(), d.day())
+
+        return {
+            "PatsientID": patsient_id,
+            "Vozrast": int(self.vozrast_edit.text()) if self.vozrast_edit.text().isdigit() else None,
+            "OrganizatsiaID": 1,
+            "Nomer": self.nomer_edit.text().strip(),
+            "ProtocolDate": protocol_date,
+            "Anestezia": self.anestezia_combo.currentText().strip(),
+            "ProtocolText": self.protocol_text.toPlainText(),
+            "Diagnos": "",
+            "OtdelenieID": otd_id,
+            "Adres": self.adres_edit.text().strip(),
+            "Istor": self.istor_edit.text().strip(),
+            "ApparatID": app_id,
+            "Otdelenie": self.otdelenie_edit.text().strip(),
+            "Anamnez": self.anamnez_edit.text().strip(),
+            "Biopsia": self._checkbox_to_str(self.chk_biopsia),
+            "IssledovanieID": iss_id,
+            "Year": protocol_date.year,
+            "Tsitologia": self._checkbox_to_str(self.chk_tsitologia),
+            "Gistologia": self._checkbox_to_str(self.chk_gistologia),
+            "Lecheb": self._checkbox_to_str(self.chk_lecheb),
+            "Sanats": self._checkbox_to_str(self.chk_sanats),
+            "Intybastia": self._checkbox_to_str(self.chk_intub),
+            "PHMetr": self._checkbox_to_str(self.chk_phmetr),
+            "Smiv": self._checkbox_to_str(self.chk_smiv),
+            "State": 1,
+        }
+
+    def _find_or_create_patsient(self, fio: str) -> int:
+        with get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT PatsientID FROM Patsient WHERE FIO = ?", [fio])
+            row = cur.fetchone()
+            if row:
+                return int(row[0])
+        return insert_patsient(self._current_patsient_data())
+
+    # =========================================================
+    #  Сохранение / добавление / удаление
+    # =========================================================
+    def on_save_changes(self):
+        fio = self.fio_edit.text().strip()
+        if not fio:
+            QMessageBox.warning(self, "Нет ФИО", "Введите Ф.И.О. пациента.")
+            return
+
+        try:
+            patsient_id = self._find_or_create_patsient(fio)
+            self.current_patient_id = patsient_id
+            update_patsient(patsient_id, self._current_patsient_data())
+
+            iss_id = self.issledovanie_combo.currentData()
+
+            if self.current_protocol_id:
+                update_protocol(self.current_protocol_id,
+                                self._current_protocol_data(patsient_id))
+            else:
+                if not iss_id:
+                    QMessageBox.warning(self, "Нет исследования", "Выберите исследование.")
+                    return
+                if not self.nomer_edit.text().strip():
+                    self._set_nomer_silent(str(get_next_protocol_nomer(iss_id)))
+                data = self._current_protocol_data(patsient_id)
+                self.current_protocol_id = insert_protocol(data)
+
+            self._save_zakluchenia(self.current_protocol_id, iss_id)
+            self._save_vrachi(self.current_protocol_id, iss_id)
+            self._save_napravlenie(self.current_protocol_id, iss_id)
+
+            QMessageBox.information(self, "Сохранено", "Изменения сохранены.")
+            self._reload_tree()
+            self._select_protocol_in_tree(self.current_protocol_id)
+            self._update_ui_state()
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка", f"Не удалось сохранить:\n{e}")
+
+    def on_add_protocol(self):
+        fio = self.fio_edit.text().strip()
+        if not fio:
+            QMessageBox.warning(self, "Нет ФИО", "Введите Ф.И.О. пациента.")
+            return
+
+        iss_id = self.issledovanie_combo.currentData()
+        print("DIAG: iss_id =", repr(iss_id))
+        print("DIAG: iss_id type =", type(iss_id))
+        if not iss_id:
+            QMessageBox.warning(self, "Нет исследования", "Выберите исследование.")
+            return
+
+        try:
+            patsient_id = self._find_or_create_patsient(fio)
+            print("DIAG: patsient_id =", repr(patsient_id))
+            self.current_patient_id = patsient_id
+
+            nomer = str(get_next_protocol_nomer(iss_id))
+            print("DIAG: nomer =", repr(nomer))
+            self._set_nomer_silent(nomer)
+
+            data = self._current_protocol_data(patsient_id)
+            print("DIAG: data =", data)
+
+            new_id = insert_protocol(data)
+            self.current_protocol_id = new_id
+
+            QMessageBox.information(self, "Создан", f"Протокол № {nomer} создан.")
+            self._reload_tree()
+            self._select_protocol_in_tree(new_id)
+            self._update_ui_state()
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            QMessageBox.critical(self, "Ошибка", f"Не удалось создать протокол:\n{e}")
+
+    def on_delete_protocol(self):
+        if not self.current_protocol_id:
+            QMessageBox.warning(self, "Нет протокола", "Сначала выберите протокол.")
+            return
+        ans = QMessageBox.question(
+            self, "Удалить протокол",
+            "Удалить выбранный протокол со всеми врачами, заключениями и направлениями?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        if ans != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            with get_connection() as conn:
+                cur = conn.cursor()
+                cur.execute("DELETE FROM Napravlenie WHERE ProtocolID = ?", [self.current_protocol_id])
+                conn.commit()
+            delete_protocol(self.current_protocol_id)
+            self.current_protocol_id = None
+            QMessageBox.information(self, "Удалено", "Протокол удалён.")
+            self._reload_tree()
+            self._update_ui_state()
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка", f"Не удалось удалить:\n{e}")
+
+    # =========================================================
+    #  Заключения
+    # =========================================================
+    def on_zakl_add(self):
+        if not self.current_protocol_id:
+            QMessageBox.warning(self, "Нет протокола", "Сначала сохраните протокол.")
+            return
+
+        texts = get_distinct_zakluchenia()
+        text, ok = QInputDialog.getItem(
+            self, "Новое заключение", "Текст заключения:",
+            texts, 0, True
+        )
+        if not ok or not text.strip():
+            return
+
+        order = self.zakl_list.count() + 1
+        iss_id = self.issledovanie_combo.currentData()
+        try:
+            insert_zakluchenie(self.current_protocol_id, text.strip(), order, iss_id)
+            self._reload_zakluchenia()
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка", f"Не удалось добавить:\n{e}")
+
+    def on_zakl_edit(self):
+        item = self.zakl_list.currentItem()
+        if not item:
+            QMessageBox.warning(self, "Ничего не выбрано", "Выберите заключение в списке.")
+            return
+        z = item.data(Qt.ItemDataRole.UserRole)
+        texts = get_distinct_zakluchenia()
+        text, ok = QInputDialog.getItem(
+            self, "Изменить заключение", "Текст:", texts, 0, True
+        )
+        if not ok or not text.strip():
+            return
+        try:
+            update_zakluchenie(z["ZakluchenieID"], text.strip(), z["ZakluchenieOrder"])
+            self._reload_zakluchenia()
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка", f"Не удалось изменить:\n{e}")
+
+    def on_zakl_del(self):
+        item = self.zakl_list.currentItem()
+        if not item:
+            QMessageBox.warning(self, "Ничего не выбрано", "Выберите заключение в списке.")
+            return
+        z = item.data(Qt.ItemDataRole.UserRole)
+        ans = QMessageBox.question(
+            self, "Удалить заключение",
+            f"Удалить:\n{z['ZakluchenieText']}?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        if ans != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            delete_zakluchenie(z["ZakluchenieID"])
+            self._reload_zakluchenia()
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка", f"Не удалось удалить:\n{e}")
+
+    def _reload_zakluchenia(self):
+        if not self.current_protocol_id:
+            return
+        self.zakl_list.clear()
+        for z in get_zakluchenia(self.current_protocol_id):
+            item = QListWidgetItem(z["ZakluchenieText"] or "")
+            item.setData(Qt.ItemDataRole.UserRole, z)
+            self.zakl_list.addItem(item)
+
+    def _save_zakluchenia(self, protocol_id: int, issledovanie_id: int):
+        for i in range(self.zakl_list.count()):
+            item = self.zakl_list.item(i)
+            text = item.text()
+            z = item.data(Qt.ItemDataRole.UserRole)
+            if z and z.get("ZakluchenieID"):
+                continue
+            insert_zakluchenie(protocol_id, text, i + 1, issledovanie_id)
+
+    # =========================================================
+    #  Врачи
+    # =========================================================
+    def on_vrach_add(self):
+        if not self.current_protocol_id:
+            QMessageBox.warning(self, "Нет протокола", "Сначала сохраните протокол.")
+            return
+
+        fio = self.vrach_combo.currentText().strip()
+        if not fio:
+            QMessageBox.warning(self, "Пусто", "Введите ФИО врача.")
+            return
+
+        iss_id = self.issledovanie_combo.currentData()
+        try:
+            vrach_type_id = insert_vrach_type_if_missing(fio)
+            order = self.vrach_list.count() + 1
+            insert_vrach(self.current_protocol_id, vrach_type_id, order, iss_id)
+            self._reload_vrachi()
+            self._load_references()
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка", f"Не удалось добавить:\n{e}")
+
+    def on_vrach_edit(self):
+        item = self.vrach_list.currentItem()
+        if not item:
+            QMessageBox.warning(self, "Ничего не выбрано", "Выберите врача в списке.")
+            return
+        v = item.data(Qt.ItemDataRole.UserRole)
+        fio, ok = QInputDialog.getText(
+            self, "Изменить врача", "ФИО:", text=v.get("VrachFIO", "")
+        )
+        if not ok or not fio.strip():
+            return
+        try:
+            update_vrach_type(v["VrachTypeID"], fio.strip())
+            self._reload_vrachi()
+            self._load_references()
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка", f"Не удалось изменить:\n{e}")
+
+    def on_vrach_del(self):
+        item = self.vrach_list.currentItem()
+        if not item:
+            QMessageBox.warning(self, "Ничего не выбрано", "Выберите врача в списке.")
+            return
+        v = item.data(Qt.ItemDataRole.UserRole)
+        ans = QMessageBox.question(
+            self, "Удалить врача",
+            f"Убрать врача из протокола:\n{v.get('VrachFIO', '')}?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        if ans != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            delete_vrach(v["VrachID"])
+            self._reload_vrachi()
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка", f"Не удалось удалить:\n{e}")
+
+    def _reload_vrachi(self):
+        if not self.current_protocol_id:
+            return
+        self.vrach_list.clear()
+        for v in get_vrachi(self.current_protocol_id):
+            item = QListWidgetItem(v.get("VrachFIO") or "")
+            item.setData(Qt.ItemDataRole.UserRole, v)
+            self.vrach_list.addItem(item)
+
+    def _save_vrachi(self, protocol_id: int, issledovanie_id: int):
+        for i in range(self.vrach_list.count()):
+            item = self.vrach_list.item(i)
+            fio = item.text()
+            v = item.data(Qt.ItemDataRole.UserRole)
+            if v and v.get("VrachID"):
+                continue
+            vrach_type_id = insert_vrach_type_if_missing(fio)
+            insert_vrach(protocol_id, vrach_type_id, i + 1, issledovanie_id)
+
+    # =========================================================
+    #  Заглушки
+    # =========================================================
     def on_settings(self):
         try:
             from ui.settings_dialog import SettingsDialog
@@ -479,8 +1134,11 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "Ошибка", f"Не удалось открыть настройки:\n{e}")
 
+    def on_find_patient(self):
+        QMessageBox.information(self, "Поиск", "Сложный поиск (в разработке)")
+
     def on_report(self):
-        QMessageBox.information(self, "Отчёт", "Формирование отчёта (в разработке)")
+        QMessageBox.information(self, "Отчёт", "Отчёты (в разработке)")
 
     def on_snapshots(self):
         QMessageBox.information(self, "Снимки", "Модуль снимков (в разработке)")

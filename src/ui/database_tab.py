@@ -5,19 +5,20 @@ import datetime
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QGroupBox,
     QLabel, QLineEdit, QPushButton, QCheckBox, QRadioButton,
-    QMessageBox, QFileDialog, QProgressBar, QComboBox
+    QMessageBox, QFileDialog, QProgressBar, QComboBox, QTextEdit
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
 
 sys.path.insert(0, r"E:\Prog\Piton\src")
 from db import test_connection, make_backup, reload_config
-from config import load_config, save_config
+from config import load_config, save_config, build_connection_string
+from migrator import Migrator
 
 import pyodbc
 
 
 # =========================================================
-#  Поток для скачивания файла
+#  Потоки
 # =========================================================
 
 class DownloadThread(QThread):
@@ -29,45 +30,25 @@ class DownloadThread(QThread):
         super().__init__()
         self.url = url
         self.dest_path = dest_path
-        self._cancelled = False
-
-    def cancel(self):
-        self._cancelled = True
 
     def run(self):
         try:
             import requests
-            headers = {
-                "User-Agent": (
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; "
-                    "rv:109.0) Gecko/20100101 Firefox/119.0"
-                )
-            }
+            headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Firefox/119.0"}
             response = requests.get(self.url, headers=headers, stream=True, timeout=30)
             response.raise_for_status()
-
             total_size = int(response.headers.get("content-length", 0))
-            block_size = 8192
             downloaded = 0
-
             with open(self.dest_path, "wb") as f:
-                for chunk in response.iter_content(chunk_size=block_size):
-                    if self._cancelled:
-                        raise InterruptedError("Скачивание отменено")
+                for chunk in response.iter_content(chunk_size=8192):
                     f.write(chunk)
                     downloaded += len(chunk)
                     if total_size > 0:
-                        percent = min(100, int(downloaded * 100 / total_size))
-                        self.progress.emit(percent)
-
+                        self.progress.emit(min(100, int(downloaded * 100 / total_size)))
             self.finished.emit(self.dest_path)
         except Exception as e:
             self.error.emit(str(e))
 
-
-# =========================================================
-#  Поток для установки MSI
-# =========================================================
 
 class InstallThread(QThread):
     finished = pyqtSignal(bool, str)
@@ -78,31 +59,64 @@ class InstallThread(QThread):
 
     def run(self):
         try:
-            cmd = [
-                "msiexec.exe",
-                "/i", self.msi_path,
-                "IACCEPTSQLLOCALDBLICENSETERMS=YES",
-                "/qn",
-                "/norestart",
-            ]
+            cmd = ["msiexec.exe", "/i", self.msi_path,
+                   "IACCEPTSQLLOCALDBLICENSETERMS=YES", "/qn", "/norestart"]
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
             if result.returncode == 0:
-                self.finished.emit(True, "LocalDB успешно установлен")
+                self.finished.emit(True, "LocalDB установлен")
             else:
-                self.finished.emit(
-                    False,
-                    f"Код возврата: {result.returncode}\n{result.stderr}"
-                )
+                self.finished.emit(False, f"Код {result.returncode}: {result.stderr}")
         except Exception as e:
             self.finished.emit(False, str(e))
 
 
-# =========================================================
-#  Фоновые потоки для проверки статуса
-# =========================================================
+class MigrationThread(QThread):
+    log = pyqtSignal(str)
+    progress = pyqtSignal(int)
+    finished = pyqtSignal(bool, str)
+
+    def __init__(self, data_dir: str, server: str, database: str):
+        super().__init__()
+        self.data_dir = data_dir
+        self.server = server
+        self.database = database
+
+    def run(self):
+        try:
+            cfg = {
+                "server": self.server,
+                "database": self.database,
+                "auth": "windows",
+                "user": "",
+                "password": "",
+                "encrypt": "no",
+                "trust_cert": "yes",
+                "backup_dir": self.data_dir,
+            }
+
+            def conn_builder(db_name):
+                c = cfg.copy()
+                c["database"] = db_name
+                return build_connection_string(c)
+
+            migrator = Migrator(
+                data_dir=self.data_dir,
+                sql_server=self.server,
+                sql_database=self.database,
+                sql_conn_str_builder=conn_builder,
+                log=lambda msg: self.log.emit(msg),
+                progress=lambda p: self.progress.emit(p),
+            )
+            migrator.run()
+            self.finished.emit(True, "Миграция завершена")
+        except Exception as e:
+            import traceback
+            self.log.emit(traceback.format_exc())
+            self.finished.emit(False, str(e))
+
 
 class LocalDBStatusThread(QThread):
-    done = pyqtSignal(bool, str)  # (installed, version)
+    done = pyqtSignal(bool, str)
 
     def run(self):
         installed = is_localdb_installed()
@@ -114,8 +128,7 @@ class ServersListThread(QThread):
     done = pyqtSignal(list)
 
     def run(self):
-        servers = list_sql_servers()
-        self.done.emit(servers)
+        self.done.emit(list_sql_servers())
 
 
 # =========================================================
@@ -123,36 +136,28 @@ class ServersListThread(QThread):
 # =========================================================
 
 def get_app_dir() -> str:
-    """Папка для скачивания установщика."""
     if getattr(sys, "frozen", False):
         return os.path.dirname(sys.executable)
     here = os.path.dirname(os.path.abspath(__file__))
-    project_dir = os.path.dirname(os.path.dirname(here))
-    return project_dir
+    return os.path.dirname(os.path.dirname(here))
 
 
 def is_localdb_installed() -> bool:
-    """Проверяет наличие LocalDB через SqlLocalDB.exe."""
     try:
-        result = subprocess.run(
-            ["SqlLocalDB.exe", "info"],
-            capture_output=True, text=True, shell=True, timeout=10
-        )
+        result = subprocess.run(["SqlLocalDB.exe", "info"],
+                                capture_output=True, text=True, shell=True, timeout=10)
         return result.returncode == 0
     except Exception:
         return False
 
 
 def get_localdb_version() -> str:
-    """Возвращает версию LocalDB, если он установлен."""
     try:
-        result = subprocess.run(
-            ["SqlLocalDB.exe", "info"],
-            capture_output=True, text=True, shell=True, timeout=10
-        )
+        result = subprocess.run(["SqlLocalDB.exe", "info"],
+                                capture_output=True, text=True, shell=True, timeout=10)
         if result.returncode == 0:
             for line in result.stdout.splitlines():
-                if "MSSQLLocalDB" in line or "Version" in line:
+                if "MSSQLLocalDB" in line:
                     return line.strip()
         return "установлен"
     except Exception:
@@ -160,7 +165,6 @@ def get_localdb_version() -> str:
 
 
 def _is_server_alive(server: str, timeout: int = 2) -> bool:
-    """Быстрая проверка: отвечает ли SQL Server по указанному имени."""
     try:
         conn_str = (
             r"DRIVER={ODBC Driver 17 for SQL Server};"
@@ -179,9 +183,6 @@ def _is_server_alive(server: str, timeout: int = 2) -> bool:
 
 
 def list_sql_servers() -> list[str]:
-    """
-    Возвращает список SQL-серверов, которые реально отвечают.
-    """
     candidates = [
         r"(localdb)\MSSQLLocalDB",
         r".\TEW_SQLEXPRESS",
@@ -189,50 +190,34 @@ def list_sql_servers() -> list[str]:
         r"localhost",
         r".",
     ]
-
-    # Добавляем то, что нашёл sqlcmd -L
     try:
-        result = subprocess.run(
-            ["sqlcmd", "-L"],
-            capture_output=True, text=True, shell=True, timeout=15
-        )
+        result = subprocess.run(["sqlcmd", "-L"],
+                                capture_output=True, text=True, shell=True, timeout=15)
         if result.returncode == 0:
             for line in result.stdout.splitlines():
                 line = line.strip()
-                if not line:
-                    continue
-                if "Servers:" in line or "SQL Server" in line:
+                if not line or "Servers:" in line or "SQL Server" in line:
                     continue
                 candidates.append(line)
     except Exception:
         pass
-
-    # Убираем дубликаты
     seen = set()
     unique = []
     for s in candidates:
         if s and s not in seen:
             unique.append(s)
             seen.add(s)
-
-    # Проверяем каждый
-    alive = []
-    for s in unique:
-        if _is_server_alive(s):
-            alive.append(s)
-    return alive
+    return [s for s in unique if _is_server_alive(s)]
 
 
 def attach_database_to_localdb(db_name: str, data_dir: str) -> tuple[bool, str]:
-    """Подключает .mdf/.ldf из data_dir к LocalDB."""
+    data_dir = os.path.normpath(data_dir)
     mdf_path = os.path.join(data_dir, f"{db_name}.mdf")
     ldf_path = os.path.join(data_dir, f"{db_name}_log.ldf")
-
     if not os.path.exists(mdf_path):
         return False, f"Файл данных не найден: {mdf_path}"
     if not os.path.exists(ldf_path):
         return False, f"Файл журнала не найден: {ldf_path}"
-
     try:
         conn_str = (
             r"DRIVER={ODBC Driver 17 for SQL Server};"
@@ -244,12 +229,10 @@ def attach_database_to_localdb(db_name: str, data_dir: str) -> tuple[bool, str]:
         )
         conn = pyodbc.connect(conn_str, autocommit=True)
         cur = conn.cursor()
-
         cur.execute("SELECT name FROM sys.databases WHERE name = ?", db_name)
         if cur.fetchone():
             conn.close()
-            return True, f"База '{db_name}' уже подключена к LocalDB"
-
+            return True, f"База '{db_name}' уже подключена"
         sql = (
             f"CREATE DATABASE [{db_name}] ON "
             f"(FILENAME = '{mdf_path}'), "
@@ -258,13 +241,12 @@ def attach_database_to_localdb(db_name: str, data_dir: str) -> tuple[bool, str]:
         )
         cur.execute(sql)
         conn.close()
-        return True, f"База '{db_name}' успешно подключена к LocalDB"
+        return True, f"База '{db_name}' подключена"
     except Exception as e:
         return False, str(e)
 
 
 def detach_database_from_server(server: str, db_name: str) -> tuple[bool, str]:
-    """Отсоединяет базу от указанного SQL-сервера."""
     try:
         conn_str = (
             r"DRIVER={ODBC Driver 17 for SQL Server};"
@@ -276,18 +258,14 @@ def detach_database_from_server(server: str, db_name: str) -> tuple[bool, str]:
         )
         conn = pyodbc.connect(conn_str, autocommit=True)
         cur = conn.cursor()
-
         cur.execute("SELECT name FROM sys.databases WHERE name = ?", db_name)
         if not cur.fetchone():
             conn.close()
-            return True, f"База '{db_name}' не найдена на сервере {server}"
-
-        cur.execute(
-            f"ALTER DATABASE [{db_name}] SET SINGLE_USER WITH ROLLBACK IMMEDIATE"
-        )
+            return True, f"База '{db_name}' не найдена на {server}"
+        cur.execute(f"ALTER DATABASE [{db_name}] SET SINGLE_USER WITH ROLLBACK IMMEDIATE")
         cur.execute(f"EXEC sp_detach_db '{db_name}'")
         conn.close()
-        return True, f"База '{db_name}' отсоединена от {server}"
+        return True, f"База '{db_name}' отсоединена"
     except Exception as e:
         return False, str(e)
 
@@ -315,21 +293,22 @@ class DatabaseTab(QWidget):
     def __init__(self):
         super().__init__()
         layout = QVBoxLayout(self)
+        layout.setSpacing(4)
+        layout.setContentsMargins(6, 6, 6, 6)
         cfg = load_config()
 
-        # ============================================
-        #  Секция 1: Установка LocalDB
-        # ============================================
+        # --- LocalDB ---
         localdb_group = QGroupBox("SQL Server Express LocalDB")
         localdb_layout = QVBoxLayout(localdb_group)
+        localdb_layout.setSpacing(4)
 
         self.status_label = QLabel("Проверка...")
         self.status_label.setWordWrap(True)
+        self.status_label.setMaximumHeight(24)
         localdb_layout.addWidget(self.status_label)
 
-        # Выпадающий список версий
         version_row = QHBoxLayout()
-        version_row.addWidget(QLabel("Версия LocalDB:"))
+        version_row.addWidget(QLabel("Версия:"))
         self.version_combo = QComboBox()
         self.version_combo.addItems(self.LOCALDB_VERSIONS.keys())
         self.version_combo.setCurrentText("SQL Server 2019")
@@ -337,14 +316,12 @@ class DatabaseTab(QWidget):
         version_row.addWidget(self.version_combo, stretch=1)
         localdb_layout.addLayout(version_row)
 
-        # URL (редактируемый)
         url_row = QHBoxLayout()
-        url_row.addWidget(QLabel("URL установщика:"))
+        url_row.addWidget(QLabel("URL:"))
         self.url_edit = QLineEdit(self.LOCALDB_VERSIONS["SQL Server 2019"])
         url_row.addWidget(self.url_edit, stretch=1)
         localdb_layout.addLayout(url_row)
 
-        # Кнопки
         btn_row = QHBoxLayout()
         self.btn_download = QPushButton("Скачать")
         self.btn_install = QPushButton("Установить")
@@ -357,60 +334,58 @@ class DatabaseTab(QWidget):
         btn_row.addStretch()
         localdb_layout.addLayout(btn_row)
 
-        # Прогресс-бар
         self.progress = QProgressBar()
         self.progress.setValue(0)
         self.progress.setVisible(False)
+        self.progress.setMaximumHeight(14)
         localdb_layout.addWidget(self.progress)
 
-        # Статус процессов
         self.proc_status = QLabel("")
         self.proc_status.setWordWrap(True)
+        self.proc_status.setMaximumHeight(24)
         localdb_layout.addWidget(self.proc_status)
 
         layout.addWidget(localdb_group)
 
-        # ============================================
-        #  Секция 2: Параметры соединения
-        # ============================================
-        conn_group = QGroupBox("Параметры соединения с SQL Server")
+        # --- Соединение ---
+        conn_group = QGroupBox("Параметры соединения")
         conn_form = QFormLayout(conn_group)
+        conn_form.setSpacing(3)
 
         server_row = QHBoxLayout()
         self.server_combo = QComboBox()
         self.server_combo.setEditable(True)
         server_row.addWidget(self.server_combo, stretch=1)
-        self.btn_refresh_servers = QPushButton("Обновить список")
+        self.btn_refresh_servers = QPushButton("↻")
+        self.btn_refresh_servers.setFixedWidth(28)
         self.btn_refresh_servers.clicked.connect(self.refresh_servers)
         server_row.addWidget(self.btn_refresh_servers)
         conn_form.addRow("Сервер", server_row)
 
         self.db_edit = QLineEdit(cfg["database"])
-        conn_form.addRow("База данных", self.db_edit)
+        conn_form.addRow("База", self.db_edit)
 
         auth_row = QHBoxLayout()
-        self.rb_windows = QRadioButton("Windows Authentication")
-        self.rb_sql = QRadioButton("SQL Server Authentication")
+        self.rb_windows = QRadioButton("Windows")
+        self.rb_sql = QRadioButton("SQL")
         if cfg.get("auth") == "sql":
             self.rb_sql.setChecked(True)
         else:
             self.rb_windows.setChecked(True)
         auth_row.addWidget(self.rb_windows)
         auth_row.addWidget(self.rb_sql)
-        conn_form.addRow("Аутентификация", auth_row)
+        auth_row.addStretch()
+        conn_form.addRow("Аутент.", auth_row)
 
-        self.user_edit = QLineEdit(cfg.get("user", ""))
-        self.pass_edit = QLineEdit(cfg.get("password", ""))
-        self.pass_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        conn_form.addRow("Пользователь", self.user_edit)
-        conn_form.addRow("Пароль", self.pass_edit)
-
-        self.chk_encrypt = QCheckBox("Encrypt Connection")
+        options_row = QHBoxLayout()
+        self.chk_encrypt = QCheckBox("Encrypt")
         self.chk_encrypt.setChecked(cfg.get("encrypt", "no") == "yes")
-        self.chk_trust = QCheckBox("Trust Server Certificate")
+        self.chk_trust = QCheckBox("Trust Server Cert")
         self.chk_trust.setChecked(cfg.get("trust_cert", "yes") == "yes")
-        conn_form.addRow("", self.chk_encrypt)
-        conn_form.addRow("", self.chk_trust)
+        options_row.addWidget(self.chk_encrypt)
+        options_row.addWidget(self.chk_trust)
+        options_row.addStretch()
+        conn_form.addRow("Опции", options_row)
 
         layout.addWidget(conn_group)
 
@@ -424,57 +399,69 @@ class DatabaseTab(QWidget):
 
         self.conn_status = QLabel("")
         self.conn_status.setWordWrap(True)
+        self.conn_status.setMaximumHeight(30)
         layout.addWidget(self.conn_status)
 
-        # ============================================
-        #  Секция 3: Работа с базой данных (attach/detach)
-        # ============================================
-        db_ops_group = QGroupBox("Работа с базой данных")
-        db_ops_layout = QVBoxLayout(db_ops_group)
+        # --- Миграция ---
+        migr_group = QGroupBox("Миграция данных из Access")
+        migr_layout = QVBoxLayout(migr_group)
+        migr_layout.setSpacing(3)
 
-        data_dir_row = QHBoxLayout()
-        data_dir_row.addWidget(QLabel("Папка с данными (.mdf/.ldf):"))
+        dir_row = QHBoxLayout()
+        dir_row.addWidget(QLabel("Папка с .mdb:"))
         self.data_dir_edit = QLineEdit(cfg.get("backup_dir", r"E:\Prog\Piton\data"))
-        data_dir_row.addWidget(self.data_dir_edit, stretch=1)
-        btn_data_browse = QPushButton("...")
-        btn_data_browse.setFixedWidth(40)
-        btn_data_browse.clicked.connect(self.on_browse_data_dir)
-        data_dir_row.addWidget(btn_data_browse)
-        db_ops_layout.addLayout(data_dir_row)
+        dir_row.addWidget(self.data_dir_edit, stretch=1)
+        btn_dir = QPushButton("...")
+        btn_dir.setFixedWidth(28)
+        btn_dir.clicked.connect(self.on_browse_data_dir)
+        dir_row.addWidget(btn_dir)
+        migr_layout.addLayout(dir_row)
 
-        ops_btn_row = QHBoxLayout()
+        migr_layout.addWidget(QLabel(
+            "Ищутся: Protocol2.mdb, ProtocolEditTemplates.mdb, ProtocolImages.mdb"
+        ))
+
+        migr_btn_row = QHBoxLayout()
+        self.btn_migrate = QPushButton("Запустить миграцию")
         self.btn_attach = QPushButton("Подключить базу к LocalDB")
+        migr_btn_row.addWidget(self.btn_migrate)
+        migr_btn_row.addWidget(self.btn_attach)
+        migr_btn_row.addStretch()
+        migr_layout.addLayout(migr_btn_row)
+
+        self.migr_progress = QProgressBar()
+        self.migr_progress.setValue(0)
+        self.migr_progress.setMaximumHeight(14)
+        migr_layout.addWidget(self.migr_progress)
+
+        self.migr_log = QTextEdit()
+        self.migr_log.setReadOnly(True)
+        self.migr_log.setMaximumHeight(70)
+        migr_layout.addWidget(self.migr_log)
+
+        layout.addWidget(migr_group)
+
+        # --- Detach ---
+        detach_row = QHBoxLayout()
         self.btn_detach = QPushButton("Отсоединить базу от старого сервера")
-        ops_btn_row.addWidget(self.btn_attach)
-        ops_btn_row.addWidget(self.btn_detach)
-        ops_btn_row.addStretch()
-        db_ops_layout.addLayout(ops_btn_row)
+        detach_row.addWidget(self.btn_detach)
+        detach_row.addStretch()
+        layout.addLayout(detach_row)
 
-        layout.addWidget(db_ops_group)
-
-        # ============================================
-        #  Секция 4: Бэкап
-        # ============================================
+        # --- Бэкап ---
         backup_group = QGroupBox("Резервное копирование")
-        backup_layout = QVBoxLayout(backup_group)
-
-        backup_dir_row = QHBoxLayout()
-        backup_dir_row.addWidget(QLabel("Папка для бэкапов:"))
+        backup_layout = QHBoxLayout(backup_group)
+        backup_layout.addWidget(QLabel("Папка:"))
         self.backup_dir_edit = QLineEdit(cfg.get("backup_dir", r"E:\Prog\Piton\data"))
-        backup_dir_row.addWidget(self.backup_dir_edit, stretch=1)
+        backup_layout.addWidget(self.backup_dir_edit, stretch=1)
         btn_browse = QPushButton("...")
-        btn_browse.setFixedWidth(40)
+        btn_browse.setFixedWidth(28)
         btn_browse.clicked.connect(self.on_browse)
-        backup_dir_row.addWidget(btn_browse)
-        backup_layout.addLayout(backup_dir_row)
-
-        btn_backup_row = QHBoxLayout()
-        self.btn_backup = QPushButton("Сделать бэкап сейчас")
-        btn_backup_row.addWidget(self.btn_backup)
-        btn_backup_row.addStretch()
-        backup_layout.addLayout(btn_backup_row)
-
+        backup_layout.addWidget(btn_browse)
+        self.btn_backup = QPushButton("Сделать бэкап")
+        backup_layout.addWidget(self.btn_backup)
         layout.addWidget(backup_group)
+
         layout.addStretch()
 
         # --- Сигналы ---
@@ -487,23 +474,20 @@ class DatabaseTab(QWidget):
         self.btn_reinstall.clicked.connect(self.on_download)
         self.btn_attach.clicked.connect(self.on_attach)
         self.btn_detach.clicked.connect(self.on_detach)
+        self.btn_migrate.clicked.connect(self.on_migrate)
 
-        # --- Таймер мигания ---
         self._blink_timer = QTimer(self)
         self._blink_timer.setInterval(500)
         self._blink_timer.timeout.connect(self._blink_tick)
         self._blink_on = False
 
-        # --- Начальная инициализация (в фоне) ---
         self.status_label.setText("⏳ Проверка LocalDB…")
         self.status_label.setStyleSheet("color: gray;")
 
         self._start_localdb_check()
         self._start_servers_refresh()
 
-    # ============================================
-    #  LocalDB: фоновые проверки
-    # ============================================
+    # --- LocalDB ---
 
     def _start_localdb_check(self):
         self._localdb_thread = LocalDBStatusThread()
@@ -512,10 +496,7 @@ class DatabaseTab(QWidget):
 
     def _on_localdb_checked(self, installed: bool, version: str):
         if installed:
-            self.status_label.setText(
-                f"✅ LocalDB установлен: {version}\n"
-                f"Можно использовать сервер: (localdb)\\MSSQLLocalDB"
-            )
+            self.status_label.setText(f"✅ LocalDB установлен: {version}")
             self.status_label.setStyleSheet("color: green;")
             self.btn_download.setVisible(False)
             self.btn_install.setVisible(False)
@@ -525,11 +506,7 @@ class DatabaseTab(QWidget):
             msi_path = os.path.join(app_dir, "SqlLocalDB.msi")
             if os.path.exists(msi_path):
                 size_mb = os.path.getsize(msi_path) / (1024 * 1024)
-                self.status_label.setText(
-                    f"❌ LocalDB не найден на этой машине.\n"
-                    f"✅ Установщик уже скачан: {msi_path} ({size_mb:.1f} МБ)\n"
-                    f"Нажмите «Установить»."
-                )
+                self.status_label.setText(f"❌ LocalDB не найден. Установщик: {size_mb:.1f} МБ")
                 self.status_label.setStyleSheet("color: orange;")
                 self.btn_download.setVisible(True)
                 self.btn_download.setText("Перекачать")
@@ -537,10 +514,7 @@ class DatabaseTab(QWidget):
                 self.btn_install.setEnabled(True)
                 self.btn_reinstall.setVisible(False)
             else:
-                self.status_label.setText(
-                    "❌ LocalDB не найден на этой машине.\n"
-                    "Скачайте установщик и установите его."
-                )
+                self.status_label.setText("❌ LocalDB не найден. Нажмите «Скачать».")
                 self.status_label.setStyleSheet("color: red;")
                 self.btn_download.setVisible(True)
                 self.btn_download.setText("Скачать")
@@ -554,28 +528,23 @@ class DatabaseTab(QWidget):
     def on_download(self):
         url = self.url_edit.text().strip()
         if not url:
-            QMessageBox.warning(self, "Ошибка", "Укажите URL установщика")
+            QMessageBox.warning(self, "Ошибка", "Укажите URL")
             return
-
         app_dir = get_app_dir()
         dest = os.path.join(app_dir, "SqlLocalDB.msi")
-
         if os.path.exists(dest):
             ans = QMessageBox.question(
-                self, "Файл существует",
-                f"Файл уже существует:\n{dest}\n\nПерекачать?",
+                self, "Файл существует", f"Перекачать?\n{dest}",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
             )
             if ans != QMessageBox.StandardButton.Yes:
                 self.btn_install.setEnabled(True)
-                self.proc_status.setText(f"Используется существующий файл: {dest}")
+                self.proc_status.setText(f"Используется: {dest}")
                 return
-
         self.progress.setVisible(True)
         self.progress.setValue(0)
-        self.proc_status.setText(f"Скачивание в {dest}...")
+        self.proc_status.setText("Скачивание...")
         self.btn_download.setEnabled(False)
-
         self.dl_thread = DownloadThread(url, dest)
         self.dl_thread.progress.connect(self.progress.setValue)
         self.dl_thread.finished.connect(self._on_download_finished)
@@ -583,13 +552,13 @@ class DatabaseTab(QWidget):
         self.dl_thread.start()
 
     def _on_download_finished(self, path):
-        self.proc_status.setText(f"✅ Скачано: {path}")
+        self.proc_status.setText("✅ Скачано")
         self.progress.setValue(100)
         self.btn_download.setEnabled(True)
         self.btn_install.setEnabled(True)
 
     def _on_download_error(self, msg):
-        self.proc_status.setText(f"❌ Ошибка скачивания: {msg}")
+        self.proc_status.setText(f"❌ {msg}")
         self.progress.setVisible(False)
         self.btn_download.setEnabled(True)
 
@@ -597,27 +566,18 @@ class DatabaseTab(QWidget):
         app_dir = get_app_dir()
         msi_path = os.path.join(app_dir, "SqlLocalDB.msi")
         if not os.path.exists(msi_path):
-            QMessageBox.warning(
-                self, "Ошибка",
-                f"Файл не найден:\n{msi_path}\nСначала скачайте."
-            )
+            QMessageBox.warning(self, "Ошибка", f"Файл не найден:\n{msi_path}")
             return
-
         ans = QMessageBox.question(
-            self, "Установка LocalDB",
-            "Установка требует прав администратора.\n"
-            "Если программа запущена без прав — установка упадёт с кодом 1603.\n"
-            "Продолжить?",
+            self, "Установка", "Требуются права администратора.\nПродолжить?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
         )
         if ans != QMessageBox.StandardButton.Yes:
             return
-
-        self.proc_status.setText("Установка LocalDB... (может занять несколько минут)")
+        self.proc_status.setText("Установка...")
         self.progress.setVisible(True)
         self.progress.setRange(0, 0)
         self.btn_install.setEnabled(False)
-
         self.inst_thread = InstallThread(msi_path)
         self.inst_thread.finished.connect(self._on_install_finished)
         self.inst_thread.start()
@@ -629,12 +589,10 @@ class DatabaseTab(QWidget):
             self.proc_status.setText(f"✅ {msg}")
             self._start_localdb_check()
         else:
-            self.proc_status.setText(f"❌ Ошибка установки: {msg}")
+            self.proc_status.setText(f"❌ {msg}")
             self.btn_install.setEnabled(True)
 
-    # ============================================
-    #  Мигание статуса поиска серверов
-    # ============================================
+    # --- Мигание ---
 
     def _start_blinking(self, text: str):
         self.conn_status.setText(f"⏳ {text}")
@@ -645,7 +603,7 @@ class DatabaseTab(QWidget):
     def _stop_blinking(self, text: str, color: str = "gray"):
         self._blink_timer.stop()
         self.conn_status.setText(text)
-        self.conn_status.setStyleSheet(f"color: {color}; font-weight: normal;")
+        self.conn_status.setStyleSheet(f"color: {color};")
 
     def _blink_tick(self):
         if self._blink_on:
@@ -653,10 +611,6 @@ class DatabaseTab(QWidget):
         else:
             self.conn_status.setStyleSheet("color: red; font-weight: bold;")
         self._blink_on = not self._blink_on
-
-    # ============================================
-    #  Список серверов (фоновый поиск)
-    # ============================================
 
     def _start_servers_refresh(self):
         self._start_blinking("Поиск SQL-серверов…")
@@ -667,125 +621,126 @@ class DatabaseTab(QWidget):
     def _on_servers_refreshed(self, servers: list):
         cfg = load_config()
         current = cfg.get("server", "")
-
         self.server_combo.clear()
         for s in servers:
             self.server_combo.addItem(s)
         if current:
             self.server_combo.setCurrentText(current)
-
         if servers:
-            self._stop_blinking(f"✅ Найдено серверов: {len(servers)}", "green")
+            self._stop_blinking(f"✅ Найдено: {len(servers)}", "green")
         else:
-            self._stop_blinking("⚠ Серверы не найдены", "orange")
+            self._stop_blinking("⚠ Не найдено", "orange")
 
     def refresh_servers(self):
         self._start_servers_refresh()
 
-    # ============================================
-    #  Соединение
-    # ============================================
+    # --- Соединение ---
 
     def _collect_cfg(self) -> dict:
         return {
             "server": self.server_combo.currentText().strip(),
             "database": self.db_edit.text().strip(),
             "auth": "sql" if self.rb_sql.isChecked() else "windows",
-            "user": self.user_edit.text().strip(),
-            "password": self.pass_edit.text(),
+            "user": "",
+            "password": "",
             "encrypt": "yes" if self.chk_encrypt.isChecked() else "no",
             "trust_cert": "yes" if self.chk_trust.isChecked() else "no",
-            "backup_dir": self.backup_dir_edit.text().strip(),
+            "backup_dir": os.path.normpath(self.backup_dir_edit.text().strip()),
         }
 
     def on_test(self):
         cfg = self._collect_cfg()
         ok, msg = test_connection(cfg)
         if ok:
-            self.conn_status.setText(f"✅ Соединение успешно: {msg}")
+            self.conn_status.setText(f"✅ {msg}")
             self.conn_status.setStyleSheet("color: green;")
         else:
-            self.conn_status.setText(f"❌ Ошибка: {msg}")
+            self.conn_status.setText(f"❌ {msg}")
             self.conn_status.setStyleSheet("color: red;")
 
     def on_save(self):
         cfg = self._collect_cfg()
         save_config(cfg)
         reload_config()
-        QMessageBox.information(
-            self, "Сохранено",
-            "Настройки сохранены в config.ini.\nПерезапустите программу."
-        )
-        self.conn_status.setText("Настройки сохранены. Требуется перезапуск.")
+        QMessageBox.information(self, "Сохранено", "Настройки сохранены.")
+        self.conn_status.setText("Настройки сохранены. Перезапустите.")
         self.conn_status.setStyleSheet("color: blue;")
 
-    # ============================================
-    #  Attach / Detach
-    # ============================================
+    # --- Миграция ---
 
-    def on_attach(self):
-        db_name = self.db_edit.text().strip() or "ProtocolDB"
-        data_dir = self.data_dir_edit.text().strip()
-
+    def on_migrate(self):
+        data_dir = os.path.normpath(self.data_dir_edit.text().strip())
         if not os.path.isdir(data_dir):
             QMessageBox.warning(self, "Ошибка", f"Папка не существует:\n{data_dir}")
             return
-
+        server = self.server_combo.currentText().strip()
+        database = self.db_edit.text().strip() or "ProtocolDB"
         ans = QMessageBox.question(
-            self, "Подключить базу",
-            f"Подключить базу '{db_name}' из\n{data_dir}\nк LocalDB?",
+            self, "Миграция",
+            f"Мигрировать в базу '{database}'?\n\n"
+            f"Сервер: {server}\nПапка: {data_dir}\n\n"
+            f"Внимание: база будет пересоздана!",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
         )
         if ans != QMessageBox.StandardButton.Yes:
             return
+        self.migr_progress.setValue(0)
+        self.migr_log.clear()
+        self.btn_migrate.setEnabled(False)
+        self.migr_thread = MigrationThread(data_dir, server, database)
+        self.migr_thread.log.connect(self._on_migr_log)
+        self.migr_thread.progress.connect(self.migr_progress.setValue)
+        self.migr_thread.finished.connect(self._on_migr_finished)
+        self.migr_thread.start()
 
-        ok, msg = attach_database_to_localdb(db_name, data_dir)
+    def _on_migr_log(self, msg: str):
+        self.migr_log.append(msg)
+
+    def _on_migr_finished(self, ok: bool, msg: str):
+        self.btn_migrate.setEnabled(True)
         if ok:
+            QMessageBox.information(self, "Миграция", f"✅ {msg}")
             self.conn_status.setText(f"✅ {msg}")
             self.conn_status.setStyleSheet("color: green;")
-            self.server_combo.setCurrentText(r"(localdb)\MSSQLLocalDB")
-
-            save_config(self._collect_cfg())
-            reload_config()
-
-            box = QMessageBox(self)
-            box.setWindowTitle("База подключена")
-            box.setIcon(QMessageBox.Icon.Information)
-            box.setText(f"{msg}\n\nПерезапустить программу сейчас?")
-            btn_restart = box.addButton("Перезапустить", QMessageBox.ButtonRole.AcceptRole)
-            box.addButton("Позже", QMessageBox.ButtonRole.RejectRole)
-            box.exec()
-
-            if box.clickedButton() == btn_restart:
-                self._restart_app()
         else:
-            QMessageBox.critical(self, "Ошибка", msg)
+            QMessageBox.critical(self, "Ошибка миграции", msg)
             self.conn_status.setText(f"❌ {msg}")
             self.conn_status.setStyleSheet("color: red;")
 
-    def _restart_app(self):
-        python = sys.executable
-        script = os.path.abspath(sys.argv[0])
-        args = sys.argv[1:]
+    # --- Attach / Detach ---
 
-        from PyQt6.QtWidgets import QApplication
-        QApplication.instance().quit()
-
-        subprocess.Popen([python, script, *args])
+    def on_attach(self):
+        db_name = self.db_edit.text().strip() or "ProtocolDB"
+        data_dir = os.path.normpath(self.data_dir_edit.text().strip())
+        if not os.path.isdir(data_dir):
+            QMessageBox.warning(self, "Ошибка", f"Папка не существует:\n{data_dir}")
+            return
+        ans = QMessageBox.question(
+            self, "Подключить базу",
+            f"Подключить '{db_name}' из\n{data_dir}\nк LocalDB?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        if ans != QMessageBox.StandardButton.Yes:
+            return
+        ok, msg = attach_database_to_localdb(db_name, data_dir)
+        if ok:
+            QMessageBox.information(self, "Успех", msg)
+            self.conn_status.setText(f"✅ {msg}")
+            self.conn_status.setStyleSheet("color: green;")
+            self.server_combo.setCurrentText(r"(localdb)\MSSQLLocalDB")
+        else:
+            QMessageBox.critical(self, "Ошибка", msg)
 
     def on_detach(self):
         server = self.server_combo.currentText().strip()
         db_name = self.db_edit.text().strip() or "ProtocolDB"
-
         ans = QMessageBox.question(
-            self, "Отсоединить базу",
-            f"Отсоединить базу '{db_name}' от сервера:\n{server}?\n\n"
-            f"Все соединения будут разорваны.",
+            self, "Отсоединить",
+            f"Отсоединить '{db_name}' от {server}?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
         )
         if ans != QMessageBox.StandardButton.Yes:
             return
-
         ok, msg = detach_database_from_server(server, db_name)
         if ok:
             QMessageBox.information(self, "Успех", msg)
@@ -793,12 +748,8 @@ class DatabaseTab(QWidget):
             self.conn_status.setStyleSheet("color: green;")
         else:
             QMessageBox.critical(self, "Ошибка", msg)
-            self.conn_status.setText(f"❌ {msg}")
-            self.conn_status.setStyleSheet("color: red;")
 
-    # ============================================
-    #  Бэкап
-    # ============================================
+    # --- Бэкап ---
 
     def on_backup(self):
         cfg = self._collect_cfg()
@@ -809,16 +760,11 @@ class DatabaseTab(QWidget):
         ts = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         db_name = cfg["database"] or "ProtocolDB"
         backup_path = os.path.join(backup_dir, f"{db_name}_{ts}.bak")
-
         ok, msg = make_backup(cfg, backup_path)
         if ok:
             QMessageBox.information(self, "Бэкап", msg)
-            self.conn_status.setText(f"✅ {msg}")
-            self.conn_status.setStyleSheet("color: green;")
         else:
-            QMessageBox.critical(self, "Ошибка бэкапа", msg)
-            self.conn_status.setText(f"❌ {msg}")
-            self.conn_status.setStyleSheet("color: red;")
+            QMessageBox.critical(self, "Ошибка", msg)
 
     def on_browse(self):
         d = QFileDialog.getExistingDirectory(
@@ -829,7 +775,7 @@ class DatabaseTab(QWidget):
 
     def on_browse_data_dir(self):
         d = QFileDialog.getExistingDirectory(
-            self, "Выберите папку с файлами базы данных", self.data_dir_edit.text()
+            self, "Выберите папку с .mdb-файлами", self.data_dir_edit.text()
         )
         if d:
             self.data_dir_edit.setText(d)

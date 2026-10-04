@@ -10,14 +10,8 @@ from PyQt6.QtCore import Qt
 sys.path.insert(0, r"E:\Prog\Piton\src")
 from db import get_references, get_connection
 from config import load_config, save_config
-
-# Импортируем вкладку «База данных» из отдельного файла
 from ui.database_tab import DatabaseTab
 
-
-# =========================================================
-#  ВКЛАДКА 1: Фильтрация пациентов
-# =========================================================
 
 class FilterTab(QWidget):
     def __init__(self):
@@ -51,10 +45,6 @@ class FilterTab(QWidget):
         layout.addStretch()
 
 
-# =========================================================
-#  ВКЛАДКА 2: Данные отделения
-# =========================================================
-
 class OtdelenieTab(QWidget):
     def __init__(self):
         super().__init__()
@@ -83,10 +73,6 @@ class OtdelenieTab(QWidget):
         except Exception as e:
             QMessageBox.warning(self, "Ошибка", f"Не удалось загрузить данные отделения:\n{e}")
 
-
-# =========================================================
-#  ВКЛАДКА 3: Документ
-# =========================================================
 
 class DocumentTab(QWidget):
     def __init__(self):
@@ -119,7 +105,7 @@ class DocumentTab(QWidget):
         formats_row.addWidget(report_group)
         layout.addLayout(formats_row)
 
-        page_group = QGroupBox("Параметры страницы (для Microsoft Internet Explorer)")
+        page_group = QGroupBox("Параметры страницы (для Internet Explorer)")
         page_layout = QVBoxLayout(page_group)
         kolont_group = QGroupBox("Колонтитулы")
         kolont_layout = QFormLayout(kolont_group)
@@ -139,7 +125,7 @@ class DocumentTab(QWidget):
         orient_layout.addWidget(self.rb_albom)
         orient_fields.addWidget(orient_group)
 
-        fields_group = QGroupBox("Поля (миллиметры)")
+        fields_group = QGroupBox("Поля (мм)")
         fields_layout = QGridLayout(fields_group)
         self.field_left = QLineEdit("19.05")
         self.field_right = QLineEdit("19.05")
@@ -168,10 +154,6 @@ class DocumentTab(QWidget):
         layout.addStretch()
 
 
-# =========================================================
-#  ВКЛАДКА 4: Редактор протокола
-# =========================================================
-
 class ProtocolEditorTab(QWidget):
     def __init__(self):
         super().__init__()
@@ -186,10 +168,6 @@ class ProtocolEditorTab(QWidget):
         layout.addWidget(styles_group)
         layout.addStretch()
 
-
-# =========================================================
-#  ВКЛАДКА 5: Настройки отчета
-# =========================================================
 
 class ReportSettingsTab(QWidget):
     def __init__(self):
@@ -237,10 +215,6 @@ class ReportSettingsTab(QWidget):
         layout.addLayout(btn_row)
         layout.addStretch()
 
-
-# =========================================================
-#  ВКЛАДКА 6: Справочники
-# =========================================================
 
 class ReferencesTab(QWidget):
     def __init__(self):
@@ -318,7 +292,7 @@ class ReferencesTab(QWidget):
         rep_layout = QVBoxLayout(rep_group)
         self.chk_show_in_report = QCheckBox("Показывать в отчете о нагрузке")
         order_row = QHBoxLayout()
-        order_row.addWidget(QLabel("Порядок следования в отчете"))
+        order_row.addWidget(QLabel("Порядок в отчете"))
         self.order_spin = QSpinBox()
         self.order_spin.setRange(0, 9999)
         order_row.addWidget(self.order_spin)
@@ -355,9 +329,13 @@ class ReferencesTab(QWidget):
                 self.grp_list.clear()
                 for row in cur.fetchall():
                     self.grp_list.addItem(row[0] or "")
-                cur.execute("SELECT IssledovanieGroupID, IssledovanieGroupName FROM IssledovanieGroup ORDER BY IssledovanieGroupID")
+                cur.execute(
+                    "SELECT IssledovanieGroupID, IssledovanieGroupName FROM IssledovanieGroup ORDER BY IssledovanieGroupID"
+                )
                 groups = cur.fetchall()
-                cur.execute("SELECT IssledovanieID, Issledovanie, IssledovanieGroupID FROM IssledovanieType ORDER BY Issledovanie")
+                cur.execute(
+                    "SELECT IssledovanieID, Issledovanie, IssledovanieGroupID FROM IssledovanieType ORDER BY Issledovanie"
+                )
                 issleds = cur.fetchall()
                 self.iss_tree.clear()
                 group_items = {}
@@ -378,15 +356,11 @@ class ReferencesTab(QWidget):
             QMessageBox.warning(self, "Ошибка", f"Не удалось загрузить справочники:\n{e}")
 
 
-# =========================================================
-#  ДИАЛОГ НАСТРОЕК
-# =========================================================
-
 class SettingsDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Настройки")
-        self.resize(950, 750)
+        self.resize(950, 620)   # ← уменьшено
 
         layout = QVBoxLayout(self)
 
