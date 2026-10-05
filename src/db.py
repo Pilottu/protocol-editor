@@ -317,22 +317,30 @@ def insert_patsient(data: dict) -> int:
     """Добавляет нового пациента. Возвращает PatsientID."""
     with get_connection() as conn:
         cur = conn.cursor()
-        cur.execute(
-            """
-            INSERT INTO Patsient (FIO, Pol, Karta, PatsientGroupID, OrganizatsiaID)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            [
-                data.get("FIO", ""),
-                data.get("Pol", ""),
-                data.get("Karta", ""),
-                data.get("PatsientGroupID", 1),
-                data.get("OrganizatsiaID", 1),
-            ]
-        )
-        cur.execute("SELECT CAST(SCOPE_IDENTITY() AS INT)")
-        new_id = cur.fetchone()[0]
-        conn.commit()
+        print("[DEBUG] insert_patsient: входные данные =", data)
+        try:
+            cur.execute(
+                """
+                INSERT INTO Patsient (FIO, Pol, Karta, PatsientGroupID, OrganizatsiaID)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                [
+                    data.get("FIO", ""),
+                    data.get("Pol", ""),
+                    data.get("Karta", ""),
+                    data.get("PatsientGroupID", 1),
+                    data.get("OrganizatsiaID", 1),
+                ]
+            )
+            print("[DEBUG] insert_patsient: INSERT выполнен, rowcount =", cur.rowcount)
+            cur.execute("SELECT CAST(SCOPE_IDENTITY() AS INT)")
+            new_id = cur.fetchone()[0]
+            print("[DEBUG] insert_patsient: SCOPE_IDENTITY =", new_id)
+            conn.commit()
+            print("[DEBUG] insert_patsient: commit выполнен")
+        except Exception as e:
+            print("[DEBUG] insert_patsient: ОШИБКА =", e)
+            raise
     return int(new_id)
 
 
