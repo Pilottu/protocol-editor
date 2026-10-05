@@ -874,35 +874,36 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Нет ФИО", "Введите Ф.И.О. пациента.")
             return
 
-        try:
-            patsient_id = self._find_or_create_patsient(fio)
-            self.current_patient_id = patsient_id
-            update_patsient(patsient_id, self._current_patsient_data())
-
-            iss_id = self.issledovanie_combo.currentData()
-
-            if self.current_protocol_id:
+        # Случай A: протокол выбран → обновляем
+        if self.current_protocol_id:
+            try:
+                patsient_id = self._find_or_create_patsient(fio)
+                self.current_patient_id = patsient_id
+                update_patsient(patsient_id, self._current_patsient_data())
                 update_protocol(self.current_protocol_id,
                                 self._current_protocol_data(patsient_id))
-            else:
-                if not iss_id:
-                    QMessageBox.warning(self, "Нет исследования", "Выберите исследование.")
-                    return
-                if not self.nomer_edit.text().strip():
-                    self._set_nomer_silent(str(get_next_protocol_nomer(iss_id)))
-                data = self._current_protocol_data(patsient_id)
-                self.current_protocol_id = insert_protocol(data)
 
-            self._save_zakluchenia(self.current_protocol_id, iss_id)
-            self._save_vrachi(self.current_protocol_id, iss_id)
-            self._save_napravlenie(self.current_protocol_id, iss_id)
+                iss_id = self.issledovanie_combo.currentData()
+                self._save_zakluchenia(self.current_protocol_id, iss_id)
+                self._save_vrachi(self.current_protocol_id, iss_id)
+                self._save_napravlenie(self.current_protocol_id, iss_id)
 
-            QMessageBox.information(self, "Сохранено", "Изменения сохранены.")
-            self._reload_tree()
-            self._select_protocol_in_tree(self.current_protocol_id)
-            self._update_ui_state()
-        except Exception as e:
-            QMessageBox.critical(self, "Ошибка", f"Не удалось сохранить:\n{e}")
+                QMessageBox.information(self, "Сохранено", "Изменения сохранены.")
+                self._reload_tree()
+                self._select_protocol_in_tree(self.current_protocol_id)
+                self._update_ui_state()
+            except Exception as e:
+                QMessageBox.critical(self, "Ошибка", f"Не удалось сохранить:\n{e}")
+            return
+
+        # Случай B/C: протокол не выбран → спрашиваем
+        ans = QMessageBox.question(
+            self, "Сохранить протокол?",
+            "Протокол не выбран. Сохранить введённые данные как новый протокол?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        if ans == QMessageBox.StandardButton.Yes:
+            self.on_add_protocol()
 
     def on_add_protocol(self):
         fio = self.fio_edit.text().strip()
@@ -911,26 +912,25 @@ class MainWindow(QMainWindow):
             return
 
         iss_id = self.issledovanie_combo.currentData()
-        print("DIAG: iss_id =", repr(iss_id))
-        print("DIAG: iss_id type =", type(iss_id))
         if not iss_id:
             QMessageBox.warning(self, "Нет исследования", "Выберите исследование.")
             return
 
         try:
             patsient_id = self._find_or_create_patsient(fio)
-            print("DIAG: patsient_id =", repr(patsient_id))
             self.current_patient_id = patsient_id
 
             nomer = str(get_next_protocol_nomer(iss_id))
-            print("DIAG: nomer =", repr(nomer))
             self._set_nomer_silent(nomer)
 
             data = self._current_protocol_data(patsient_id)
-            print("DIAG: data =", data)
-
             new_id = insert_protocol(data)
             self.current_protocol_id = new_id
+
+            # Сохраняем врачей, заключения, направление
+            self._save_zakluchenia(new_id, iss_id)
+            self._save_vrachi(new_id, iss_id)
+            self._save_napravlenie(new_id, iss_id)
 
             QMessageBox.information(self, "Создан", f"Протокол № {nomer} создан.")
             self._reload_tree()

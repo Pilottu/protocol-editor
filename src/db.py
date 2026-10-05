@@ -5,13 +5,11 @@ from typing import Optional
 from config import load_config, build_connection_string
 
 
-# --- Загружаем настройки при старте ---
 _CFG = load_config()
 CONN_STR = build_connection_string(_CFG)
 
 
 def reload_config():
-    """Перечитывает config.ini и обновляет CONN_STR."""
     global _CFG, CONN_STR
     _CFG = load_config()
     CONN_STR = build_connection_string(_CFG)
@@ -259,7 +257,7 @@ def get_references() -> dict:
 
 
 # =========================================================
-#  БЭКАП И ВОССТАНОВЛЕНИЕ
+#  БЭКАП
 # =========================================================
 
 def test_connection(cfg: dict) -> tuple[bool, str]:
@@ -276,22 +274,145 @@ def test_connection(cfg: dict) -> tuple[bool, str]:
 
 
 def make_backup(cfg: dict, backup_path: str) -> tuple[bool, str]:
+    """Делает BACKUP DATABASE в указанный файл."""
+    import os
     try:
+        backup_dir = os.path.dirname(backup_path)
+        if backup_dir and not os.path.isdir(backup_dir):
+            os.makedirs(backup_dir, exist_ok=True)
+
+        if os.path.exists(backup_path):
+            try:
+                os.remove(backup_path)
+            except Exception:
+                pass
+
         cfg_master = cfg.copy()
         cfg_master["database"] = "master"
         conn = pyodbc.connect(build_connection_string(cfg_master), autocommit=True)
         cur = conn.cursor()
         db_name = cfg["database"]
-        sql = f"BACKUP DATABASE [{db_name}] TO DISK = ? WITH INIT"
-        cur.execute(sql, [backup_path])
+
+        safe_path = backup_path.replace("'", "''")
+        sql = f"BACKUP DATABASE [{db_name}] TO DISK = N'{safe_path}' WITH INIT"
+
+        print("[DEBUG] make_backup: SQL =", sql)
+        cur.execute(sql)
+        print("[DEBUG] make_backup: rowcount =", cur.rowcount)
+
+        # Получаем все сообщения от SQL Server
+        try:
+            while True:
+                if cur.messages:
+                    for msg in cur.messages:
+                        print("[DEBUG] SQL Server:", msg)
+                if not cur.nextset():
+                    break
+        except Exception as e:
+            print("[DEBUG] messages error:", e)
+
         conn.close()
+
+        if not os.path.exists(backup_path):
+            return False, f"Бэкап не создан: {backup_path}"
+
         return True, f"Бэкап сохранён: {backup_path}"
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         return False, str(e)
 
+def restore_backup(cfg: dict, backup_path: str) -> tuple[bool, str]:
+    """Восстанавливает базу из .bak-файла с MOVE."""
+    import os
+    import time
+
+    conn = None
+    try:
+        backup_path = os.path.abspath(backup_path)
+        if not os.path.exists(backup_path):
+            return False, f"Файл не найден: {backup_path}"
+
+        cfg_master = cfg.copy()
+        cfg_master["database"] = "master"
+        conn = pyodbc.connect(build_connection_string(cfg_master), autocommit=True)
+        cur = conn.cursor()
+        db_name = cfg["database"]
+
+        # Reuse the database entry so RESTORE WITH REPLACE can recover an
+        # interrupted restore without detaching or deleting its files.
+        cur.execute("SELECT state_desc FROM sys.databases WHERE name = ?", db_name)
+        row = cur.fetchone()
+        if row:
+            if row[0] == "ONLINE":
+                cur.execute(
+                    f"ALTER DATABASE [{db_name}] SET SINGLE_USER WITH ROLLBACK IMMEDIATE"
+                )
+            elif row[0] != "RESTORING":
+                return False, (
+                    f"Невозможно восстановить базу '{db_name}': "
+                    f"текущее состояние {row[0]}"
+                )
+
+        # Пути для MOVE
+        data_dir = os.path.dirname(backup_path)
+        mdf_path = os.path.join(data_dir, f"{db_name}.mdf")
+        ldf_path = os.path.join(data_dir, f"{db_name}_log.ldf")
+
+        # Восстанавливаем с MOVE
+        safe_backup = backup_path.replace("'", "''")
+        safe_mdf = mdf_path.replace("'", "''")
+        safe_ldf = ldf_path.replace("'", "''")
+        sql = (
+            f"RESTORE DATABASE [{db_name}] "
+            f"FROM DISK = N'{safe_backup}' "
+            f"WITH REPLACE, RECOVERY, "
+            f"MOVE '{db_name}' TO N'{safe_mdf}', "
+            f"MOVE '{db_name}_log' TO N'{safe_ldf}'"
+        )
+        cur.execute(sql)
+        while cur.nextset():
+            pass
+        conn.close()
+        conn = None
+
+        state_desc = None
+        for _ in range(50):
+            check_conn = pyodbc.connect(
+                build_connection_string(cfg_master), autocommit=True
+            )
+            try:
+                check_cur = check_conn.cursor()
+                check_cur.execute(
+                    "SELECT state_desc FROM sys.databases WHERE name = ?", db_name
+                )
+                state = check_cur.fetchone()
+                state_desc = state[0] if state else None
+            finally:
+                check_conn.close()
+            if state_desc == "ONLINE":
+                break
+            time.sleep(0.2)
+
+        if state_desc != "ONLINE":
+            actual_state = state_desc or "не найдена"
+            return False, (
+                f"Восстановление завершилось, но база '{db_name}' "
+                f"не перешла в состояние ONLINE (текущее состояние: {actual_state})"
+            )
+        conn = pyodbc.connect(build_connection_string(cfg_master), autocommit=True)
+        cur = conn.cursor()
+        cur.execute(f"ALTER DATABASE [{db_name}] SET AUTO_CLOSE OFF")
+        cur.execute(f"ALTER DATABASE [{db_name}] SET MULTI_USER")
+        return True, f"База '{db_name}' восстановлена из {backup_path}"
+    except Exception as e:
+        return False, str(e)
+    finally:
+        if conn is not None:
+            conn.close()
 
 # =========================================================
-#  СОХРАНЕНИЕ / ДОБАВЛЕНИЕ / УДАЛЕНИЕ
+#  ПАЦИЕНТЫ
 # =========================================================
 
 def update_patsient(patsient_id: int, data: dict) -> bool:
@@ -317,31 +438,27 @@ def insert_patsient(data: dict) -> int:
     """Добавляет нового пациента. Возвращает PatsientID."""
     with get_connection() as conn:
         cur = conn.cursor()
-        print("[DEBUG] insert_patsient: входные данные =", data)
-        try:
-            cur.execute(
-                """
-                INSERT INTO Patsient (FIO, Pol, Karta, PatsientGroupID, OrganizatsiaID)
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                [
-                    data.get("FIO", ""),
-                    data.get("Pol", ""),
-                    data.get("Karta", ""),
-                    data.get("PatsientGroupID", 1),
-                    data.get("OrganizatsiaID", 1),
-                ]
-            )
-            print("[DEBUG] insert_patsient: INSERT выполнен, rowcount =", cur.rowcount)
-            cur.execute("SELECT CAST(SCOPE_IDENTITY() AS INT)")
-            new_id = cur.fetchone()[0]
-            print("[DEBUG] insert_patsient: SCOPE_IDENTITY =", new_id)
-            conn.commit()
-            print("[DEBUG] insert_patsient: commit выполнен")
-        except Exception as e:
-            print("[DEBUG] insert_patsient: ОШИБКА =", e)
-            raise
-    return int(new_id)
+        cur.execute("SELECT ISNULL(MAX(PatsientID), 0) + 1 FROM Patsient")
+        new_id = int(cur.fetchone()[0])
+
+        cur.execute("SET IDENTITY_INSERT Patsient ON")
+        cur.execute(
+            """
+            INSERT INTO Patsient (PatsientID, FIO, Pol, Karta, PatsientGroupID, OrganizatsiaID)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            [
+                new_id,
+                data.get("FIO", ""),
+                data.get("Pol", ""),
+                data.get("Karta", ""),
+                data.get("PatsientGroupID", 1),
+                data.get("OrganizatsiaID", 1),
+            ]
+        )
+        cur.execute("SET IDENTITY_INSERT Patsient OFF")
+        conn.commit()
+    return new_id
 
 
 def get_next_protocol_nomer(issledovanie_id: int) -> int:
@@ -402,16 +519,21 @@ def insert_protocol(data: dict) -> int:
     """Добавляет новый протокол. Возвращает ProtocolID."""
     with get_connection() as conn:
         cur = conn.cursor()
+        cur.execute("SELECT ISNULL(MAX(ProtocolID), 0) + 1 FROM Protocol")
+        new_id = int(cur.fetchone()[0])
+
+        cur.execute("SET IDENTITY_INSERT Protocol ON")
         cur.execute(
             """
             INSERT INTO Protocol (
-                PatsientID, Vozrast, OrganizatsiaID, Nomer, ProtocolDate,
+                ProtocolID, PatsientID, Vozrast, OrganizatsiaID, Nomer, ProtocolDate,
                 Anestezia, ProtocolText, Diagnos, OtdelenieID, Adres, Istor,
                 ApparatID, Otdelenie, Anamnez, Biopsia, IssledovanieID, [Year],
                 Tsitologia, Gistologia, Lecheb, Sanats, Intybastia, PHMetr, Smiv, State
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
+                new_id,
                 data.get("PatsientID"),
                 data.get("Vozrast"),
                 data.get("OrganizatsiaID", 1),
@@ -439,10 +561,9 @@ def insert_protocol(data: dict) -> int:
                 data.get("State", 1),
             ]
         )
-        cur.execute("SELECT CAST(SCOPE_IDENTITY() AS INT)")
-        new_id = cur.fetchone()[0]
+        cur.execute("SET IDENTITY_INSERT Protocol OFF")
         conn.commit()
-    return int(new_id)
+    return new_id
 
 
 def delete_protocol(protocol_id: int) -> bool:
@@ -472,18 +593,21 @@ def insert_zakluchenie(protocol_id: int, text: str, order: int,
                        issledovanie_id: int, organizatsia_id: int = 1) -> int:
     with get_connection() as conn:
         cur = conn.cursor()
+        cur.execute("SELECT ISNULL(MAX(ZakluchenieID), 0) + 1 FROM Zakluchenie")
+        new_id = int(cur.fetchone()[0])
+
+        cur.execute("SET IDENTITY_INSERT Zakluchenie ON")
         cur.execute(
             """
-            INSERT INTO Zakluchenie (ProtocolID, ZakluchenieText, ZakluchenieOrder,
-                                     IssledovanieID, OrganizatsiaID)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO Zakluchenie (ZakluchenieID, ProtocolID, ZakluchenieText,
+                                     ZakluchenieOrder, IssledovanieID, OrganizatsiaID)
+            VALUES (?, ?, ?, ?, ?, ?)
             """,
-            [protocol_id, text, order, issledovanie_id, organizatsia_id]
+            [new_id, protocol_id, text, order, issledovanie_id, organizatsia_id]
         )
-        cur.execute("SELECT CAST(SCOPE_IDENTITY() AS INT)")
-        new_id = cur.fetchone()[0]
+        cur.execute("SET IDENTITY_INSERT Zakluchenie OFF")
         conn.commit()
-    return int(new_id)
+    return new_id
 
 
 def update_zakluchenie(zakl_id: int, text: str, order: int) -> bool:
@@ -517,31 +641,40 @@ def insert_vrach_type_if_missing(fio: str) -> int:
         row = cur.fetchone()
         if row:
             return int(row[0])
+
+        cur.execute("SELECT ISNULL(MAX(VrachTypeID), 0) + 1 FROM VrachType")
+        new_id = int(cur.fetchone()[0])
+
+        cur.execute("SET IDENTITY_INSERT VrachType ON")
         cur.execute(
-            "INSERT INTO VrachType (FIO, OrganizatsiaID) VALUES (?, ?)",
-            [fio, 1]
+            "INSERT INTO VrachType (VrachTypeID, FIO, OrganizatsiaID) VALUES (?, ?, ?)",
+            [new_id, fio, 1]
         )
-        cur.execute("SELECT CAST(SCOPE_IDENTITY() AS INT)")
-        new_id = cur.fetchone()[0]
+        cur.execute("SET IDENTITY_INSERT VrachType OFF")
         conn.commit()
-    return int(new_id)
+    return new_id
 
 
 def insert_vrach(protocol_id: int, vrach_type_id: int, order: int,
                  issledovanie_id: int, organizatsia_id: int = 1) -> int:
     with get_connection() as conn:
         cur = conn.cursor()
+        cur.execute("SELECT ISNULL(MAX(VrachID), 0) + 1 FROM Vrach")
+        new_id = int(cur.fetchone()[0])
+
+        cur.execute("SET IDENTITY_INSERT Vrach ON")
         cur.execute(
             """
-            INSERT INTO Vrach (ProtocolID, VrachTypeID, OrganizatsiaID, IssledovanieID, VrachOrder)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO Vrach (VrachID, ProtocolID, VrachTypeID, OrganizatsiaID,
+                               IssledovanieID, VrachOrder)
+            VALUES (?, ?, ?, ?, ?, ?)
             """,
-            [protocol_id, vrach_type_id, organizatsia_id, issledovanie_id, order]
+            [new_id, protocol_id, vrach_type_id, organizatsia_id,
+             issledovanie_id, order]
         )
-        cur.execute("SELECT CAST(SCOPE_IDENTITY() AS INT)")
-        new_id = cur.fetchone()[0]
+        cur.execute("SET IDENTITY_INSERT Vrach OFF")
         conn.commit()
-    return int(new_id)
+    return new_id
 
 
 def delete_vrach(vrach_id: int) -> bool:
@@ -563,7 +696,6 @@ def update_vrach_type(vrach_type_id: int, fio: str) -> bool:
 
 
 def delete_vrach_type(vrach_type_id: int) -> bool:
-    """Удаляет врача из справочника. Если используется в Vrach — не трогает."""
     with get_connection() as conn:
         cur = conn.cursor()
         cur.execute("SELECT COUNT(*) FROM Vrach WHERE VrachTypeID = ?", [vrach_type_id])

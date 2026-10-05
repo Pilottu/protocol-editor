@@ -10,7 +10,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
 
 sys.path.insert(0, r"E:\Prog\Piton\src")
-from db import test_connection, make_backup, reload_config
+from db import test_connection, make_backup, reload_config, restore_backup
 from config import load_config, save_config, build_connection_string
 from migrator import Migrator
 
@@ -299,7 +299,9 @@ class DatabaseTab(QWidget):
         layout.setContentsMargins(6, 6, 6, 6)
         cfg = load_config()
 
-        # --- LocalDB ---
+        # ============================================
+        #  Секция 1: Установка LocalDB
+        # ============================================
         localdb_group = QGroupBox("SQL Server Express LocalDB")
         localdb_layout = QVBoxLayout(localdb_group)
         localdb_layout.setSpacing(4)
@@ -349,7 +351,9 @@ class DatabaseTab(QWidget):
 
         layout.addWidget(localdb_group)
 
-        # --- Соединение ---
+        # ============================================
+        #  Секция 2: Параметры соединения
+        # ============================================
         conn_group = QGroupBox("Параметры соединения")
         conn_form = QFormLayout(conn_group)
         conn_form.setSpacing(3)
@@ -395,7 +399,7 @@ class DatabaseTab(QWidget):
         self.btn_test = QPushButton("Проверить соединение")
         self.btn_save = QPushButton("Сохранить настройки")
         self.btn_restart = QPushButton("Перезапустить программу")
-        self.btn_restart.setVisible(False)   # скрыта, пока не сохранили
+        self.btn_restart.setVisible(False)
         btn_conn_row.addWidget(self.btn_test)
         btn_conn_row.addWidget(self.btn_save)
         btn_conn_row.addWidget(self.btn_restart)
@@ -407,10 +411,12 @@ class DatabaseTab(QWidget):
         self.conn_status.setMaximumHeight(30)
         layout.addWidget(self.conn_status)
 
-        # --- Миграция ---
+        # ============================================
+        #  Секция 3: Миграция
+        # ============================================
         migr_group = QGroupBox("Миграция данных из Access")
         migr_layout = QVBoxLayout(migr_group)
-        migr_layout.setSpacing(3)
+        migr_layout.setSpacing(4)
 
         dir_row = QHBoxLayout()
         dir_row.addWidget(QLabel("Папка с .mdb:"))
@@ -422,17 +428,15 @@ class DatabaseTab(QWidget):
         dir_row.addWidget(btn_dir)
         migr_layout.addLayout(dir_row)
 
-        migr_layout.addWidget(QLabel(
-            "Ищутся: Protocol2.mdb, ProtocolEditTemplates.mdb, ProtocolImages.mdb"
-        ))
-
         migr_btn_row = QHBoxLayout()
         self.btn_migrate = QPushButton("Запустить миграцию")
-        self.btn_attach = QPushButton("Подключить базу к LocalDB")
         migr_btn_row.addWidget(self.btn_migrate)
-        migr_btn_row.addWidget(self.btn_attach)
         migr_btn_row.addStretch()
         migr_layout.addLayout(migr_btn_row)
+
+        migr_layout.addWidget(QLabel(
+            "Ищутся базы: Protocol2.mdb, ProtocolEditTemplates.mdb, ProtocolImages.mdb"
+        ))
 
         self.migr_progress = QProgressBar()
         self.migr_progress.setValue(0)
@@ -446,34 +450,67 @@ class DatabaseTab(QWidget):
 
         layout.addWidget(migr_group)
 
-        # --- Detach ---
-        detach_row = QHBoxLayout()
-        self.btn_detach = QPushButton("Отсоединить базу от старого сервера")
-        detach_row.addWidget(self.btn_detach)
-        detach_row.addStretch()
-        layout.addLayout(detach_row)
+        # ============================================
+        #  Секция 4: Для переноса и копирования
+        # ============================================
+        transfer_group = QGroupBox("Для переноса и копирования")
+        transfer_layout = QVBoxLayout(transfer_group)
+        transfer_layout.setSpacing(4)
 
-        # --- Бэкап ---
+        transfer_btn_row = QHBoxLayout()
+        self.btn_detach = QPushButton("Отсоединить базу от старого сервера")
+        self.btn_attach = QPushButton("Подключить базу к LocalDB")
+        transfer_btn_row.addWidget(self.btn_detach)
+        transfer_btn_row.addWidget(self.btn_attach)
+        transfer_btn_row.addStretch()
+        transfer_layout.addLayout(transfer_btn_row)
+
+        transfer_hint = QLabel(
+            "Отсоединяет базу от текущего SQL Server, чтобы файлы .mdf/.ldf "
+            "можно было перенести на другой компьютер."
+        )
+        transfer_hint.setStyleSheet("color: gray;")
+        transfer_hint.setWordWrap(True)
+        transfer_layout.addWidget(transfer_hint)
+
+        layout.addWidget(transfer_group)
+
+        # ============================================
+        #  Секция 5: Резервное копирование
+        # ============================================
         backup_group = QGroupBox("Резервное копирование")
-        backup_layout = QHBoxLayout(backup_group)
-        backup_layout.addWidget(QLabel("Папка:"))
+        backup_layout = QVBoxLayout(backup_group)
+        backup_layout.setSpacing(4)
+
+        backup_dir_row = QHBoxLayout()
+        backup_dir_row.addWidget(QLabel("Папка для бэкапов:"))
         self.backup_dir_edit = QLineEdit(cfg.get("backup_dir", r"E:\Prog\Piton\data"))
-        backup_layout.addWidget(self.backup_dir_edit, stretch=1)
+        backup_dir_row.addWidget(self.backup_dir_edit, stretch=1)
         btn_browse = QPushButton("...")
         btn_browse.setFixedWidth(28)
         btn_browse.clicked.connect(self.on_browse)
-        backup_layout.addWidget(btn_browse)
-        self.btn_backup = QPushButton("Сделать бэкап")
-        backup_layout.addWidget(self.btn_backup)
-        layout.addWidget(backup_group)
+        backup_dir_row.addWidget(btn_browse)
+        backup_layout.addLayout(backup_dir_row)
 
+        backup_btn_row = QHBoxLayout()
+        self.btn_backup = QPushButton("Сделать бэкап")
+        self.btn_restore = QPushButton("Восстановить из бэкапа")
+        backup_btn_row.addWidget(self.btn_backup)
+        backup_btn_row.addWidget(self.btn_restore)
+        backup_btn_row.addStretch()
+        backup_layout.addLayout(backup_btn_row)
+
+        layout.addWidget(backup_group)
         layout.addStretch()
 
-        # --- Сигналы ---
+        # ============================================
+        #  Сигналы
+        # ============================================
         self.btn_test.clicked.connect(self.on_test)
         self.btn_save.clicked.connect(self.on_save)
         self.btn_restart.clicked.connect(self.on_restart)
         self.btn_backup.clicked.connect(self.on_backup)
+        self.btn_restore.clicked.connect(self.on_restore)
         btn_browse.clicked.connect(self.on_browse)
         self.btn_download.clicked.connect(self.on_download)
         self.btn_install.clicked.connect(self.on_install)
@@ -482,18 +519,26 @@ class DatabaseTab(QWidget):
         self.btn_detach.clicked.connect(self.on_detach)
         self.btn_migrate.clicked.connect(self.on_migrate)
 
+        # ============================================
+        #  Таймер мигания
+        # ============================================
         self._blink_timer = QTimer(self)
         self._blink_timer.setInterval(500)
         self._blink_timer.timeout.connect(self._blink_tick)
         self._blink_on = False
 
+        # ============================================
+        #  Инициализация
+        # ============================================
         self.status_label.setText("⏳ Проверка LocalDB…")
         self.status_label.setStyleSheet("color: gray;")
 
         self._start_localdb_check()
         self._start_servers_refresh()
 
-    # --- LocalDB ---
+    # ============================================
+    #  LocalDB
+    # ============================================
 
     def _start_localdb_check(self):
         self._localdb_thread = LocalDBStatusThread()
@@ -598,7 +643,9 @@ class DatabaseTab(QWidget):
             self.proc_status.setText(f"❌ {msg}")
             self.btn_install.setEnabled(True)
 
-    # --- Мигание ---
+    # ============================================
+    #  Мигание
+    # ============================================
 
     def _start_blinking(self, text: str):
         self.conn_status.setText(f"⏳ {text}")
@@ -640,7 +687,9 @@ class DatabaseTab(QWidget):
     def refresh_servers(self):
         self._start_servers_refresh()
 
-    # --- Соединение ---
+    # ============================================
+    #  Соединение
+    # ============================================
 
     def _collect_cfg(self) -> dict:
         return {
@@ -671,26 +720,17 @@ class DatabaseTab(QWidget):
         self.conn_status.setText("✅ Настройки сохранены. Требуется перезапуск.")
         self.conn_status.setStyleSheet("color: blue;")
         self.btn_restart.setVisible(True)
-    def on_restart(self):
-        """Перезапускает текущий процесс программы."""
-        import subprocess
-        python = sys.executable
-        script = os.path.abspath(sys.argv[0])
-        args = sys.argv[1:]
 
-        from PyQt6.QtWidgets import QApplication
-        QApplication.instance().quit()
-        subprocess.Popen([python, script, *args])
-        
-    # --- Миграция ---
+    # ============================================
+    #  Миграция
+    # ============================================
 
     def on_migrate(self):
-        source_dir = os.path.normpath(self.data_dir_edit.text().strip())
-        if not os.path.isdir(source_dir):
-            QMessageBox.warning(self, "Ошибка", f"Папка с .mdb не существует:\n{source_dir}")
+        data_dir = os.path.normpath(self.data_dir_edit.text().strip())
+        if not os.path.isdir(data_dir):
+            QMessageBox.warning(self, "Ошибка", f"Папка не существует:\n{data_dir}")
             return
 
-        # Папка данных программы — куда кладём .mdf/.ldf
         target_dir = os.path.normpath(get_app_dir() + r"\data")
         os.makedirs(target_dir, exist_ok=True)
 
@@ -700,7 +740,7 @@ class DatabaseTab(QWidget):
         ans = QMessageBox.question(
             self, "Миграция",
             f"Мигрировать в базу '{database}'?\n\n"
-            f"Источник (.mdb): {source_dir}\n"
+            f"Источник (.mdb): {data_dir}\n"
             f"Файлы базы: {target_dir}\n\n"
             f"Внимание: база будет пересоздана!",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
@@ -711,7 +751,8 @@ class DatabaseTab(QWidget):
         self.migr_progress.setValue(0)
         self.migr_log.clear()
         self.btn_migrate.setEnabled(False)
-        self.migr_thread = MigrationThread(source_dir, target_dir, server, database)
+
+        self.migr_thread = MigrationThread(data_dir, target_dir, server, database)
         self.migr_thread.log.connect(self._on_migr_log)
         self.migr_thread.progress.connect(self.migr_progress.setValue)
         self.migr_thread.finished.connect(self._on_migr_finished)
@@ -731,7 +772,9 @@ class DatabaseTab(QWidget):
             self.conn_status.setText(f"❌ {msg}")
             self.conn_status.setStyleSheet("color: red;")
 
-    # --- Attach / Detach ---
+    # ============================================
+    #  Attach / Detach
+    # ============================================
 
     def on_attach(self):
         db_name = self.db_edit.text().strip() or "ProtocolDB"
@@ -773,7 +816,9 @@ class DatabaseTab(QWidget):
         else:
             QMessageBox.critical(self, "Ошибка", msg)
 
-    # --- Бэкап ---
+    # ============================================
+    #  Бэкап / восстановление
+    # ============================================
 
     def on_backup(self):
         cfg = self._collect_cfg()
@@ -787,8 +832,48 @@ class DatabaseTab(QWidget):
         ok, msg = make_backup(cfg, backup_path)
         if ok:
             QMessageBox.information(self, "Бэкап", msg)
+            self.conn_status.setText(f"✅ {msg}")
+            self.conn_status.setStyleSheet("color: green;")
         else:
             QMessageBox.critical(self, "Ошибка", msg)
+            self.conn_status.setText(f"❌ {msg}")
+            self.conn_status.setStyleSheet("color: red;")
+
+    def on_restore(self):
+        cfg = self._collect_cfg()
+        db_name = cfg["database"] or "ProtocolDB"
+
+        backup_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Выберите файл бэкапа (.bak)",
+            cfg.get("backup_dir", ""),
+            "SQL Server Backup (*.bak);;Все файлы (*)"
+        )
+        if not backup_path:
+            return
+
+        ans = QMessageBox.question(
+            self, "Восстановление базы",
+            f"Восстановить базу '{db_name}' из файла:\n{backup_path}?\n\n"
+            f"ВНИМАНИЕ: текущая база '{db_name}' будет УДАЛЕНА и заменена!",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        if ans != QMessageBox.StandardButton.Yes:
+            return
+        
+        ok, msg = restore_backup(cfg, backup_path)
+        if ok:
+            QMessageBox.information(self, "Восстановлено", msg)
+            self.conn_status.setText(f"✅ {msg}")
+            self.conn_status.setStyleSheet("color: green;")
+        else:
+            QMessageBox.critical(self, "Ошибка восстановления", msg)
+            self.conn_status.setText(f"❌ {msg}")
+            self.conn_status.setStyleSheet("color: red;")
+
+    # ============================================
+    #  Папки
+    # ============================================
 
     def on_browse(self):
         d = QFileDialog.getExistingDirectory(
@@ -803,3 +888,14 @@ class DatabaseTab(QWidget):
         )
         if d:
             self.data_dir_edit.setText(d)
+
+    def on_restart(self):
+        """Перезапускает текущий процесс программы."""
+        import subprocess
+        python = sys.executable
+        script = os.path.abspath(sys.argv[0])
+        args = sys.argv[1:]
+
+        from PyQt6.QtWidgets import QApplication
+        QApplication.instance().quit()
+        subprocess.Popen([python, script, *args])
