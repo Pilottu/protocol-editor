@@ -30,3 +30,4 @@
    git clone https://github.com/Pilottu/protocol-editor.git
    cd protocol-editor
    .\.venv\Scripts\Activate.ps1
+   python src\ui\main_window.py

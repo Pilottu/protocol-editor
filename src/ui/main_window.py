@@ -1147,7 +1147,17 @@ class MainWindow(QMainWindow):
         QMessageBox.information(self, "Проверка", "Проверка протоколов (в разработке)")
 
     def on_print(self):
-        QMessageBox.information(self, "Печать", "Печать протокола (в разработке)")
+        if not self.current_protocol_id:
+            QMessageBox.warning(self, "Нет протокола", "Выберите протокол в дереве.")
+            return
+        try:
+            from print_protocol import print_protocol
+            path = print_protocol(self.current_protocol_id)
+            self.statusBar().showMessage(f"Протокол открыт: {path}")
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            QMessageBox.critical(self, "Ошибка печати", f"Не удалось сформировать протокол:\n{e}")
 
     def on_templates(self):
         QMessageBox.information(self, "Шаблоны", "Список шаблонов (в разработке)")
