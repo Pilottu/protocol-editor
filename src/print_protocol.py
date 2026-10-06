@@ -231,8 +231,30 @@ def open_in_browser(html: str, filename: str = None):
     return path
 
 
+def open_in_word(html: str, filename: str = None):
+    """Сохраняет HTML с расширением .doc и открывает в Word."""
+    if not filename:
+        filename = f"protocol_{datetime.now().strftime('%Y%m%d_%H%M%S')}.doc"
+    path = os.path.join(tempfile.gettempdir(), filename)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(html)
+    os.startfile(path)
+    return path
+
+
 def print_protocol(protocol_id: int):
-    """Основная функция: собрать → открыть в браузере."""
+    """Основная функция: собрать данные и открыть в нужном формате."""
+    # Читаем настройку формата из БД
+    try:
+        from db import get_setting
+        fmt = get_setting("format_protocol", "html")
+    except Exception:
+        fmt = "html"
+
     data = load_protocol_data(protocol_id)
     html = build_html(data)
-    return open_in_browser(html, f"protocol_{protocol_id}.html")
+
+    if fmt == "rtf":
+        return open_in_word(html, f"protocol_{protocol_id}.doc")
+    else:
+        return open_in_browser(html, f"protocol_{protocol_id}.html")

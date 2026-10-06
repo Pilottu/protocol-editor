@@ -8,7 +8,10 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt
 
 sys.path.insert(0, r"E:\Prog\Piton\src")
-from db import get_references, get_connection
+from db import (
+    get_references, get_connection,
+    get_settings_with_defaults, save_settings,
+)
 from config import load_config, save_config
 from ui.database_tab import DatabaseTab
 
@@ -152,6 +155,40 @@ class DocumentTab(QWidget):
         btn_row.addStretch()
         layout.addLayout(btn_row)
         layout.addStretch()
+
+        self._load_from_db()
+
+    def _load_from_db(self):
+        """Загружает настройки из БД."""
+        s = get_settings_with_defaults()
+
+        self.zagolovok_edit.setText(s.get("document_title", ""))
+
+        if s.get("format_protocol") == "html":
+            self.rb_proto_html.setChecked(True)
+        else:
+            self.rb_proto_rtf.setChecked(True)
+
+        fmt = s.get("format_report", "html")
+        if fmt == "html":
+            self.rb_rep_html.setChecked(True)
+        elif fmt == "excel":
+            self.rb_rep_excel.setChecked(True)
+        else:
+            self.rb_rep_rtf.setChecked(True)
+
+        self.verh_kolont.setText(s.get("kartoteka_header", "&w&bPage &p of &P"))
+        self.nizh_kolont.setText(s.get("kartoteka_footer", "&u&b&d"))
+
+        if s.get("kartoteka_orientation") == "portrait":
+            self.rb_knizh.setChecked(True)
+        else:
+            self.rb_albom.setChecked(True)
+
+        self.field_left.setText(s.get("page_margin_left", "19.05"))
+        self.field_right.setText(s.get("page_margin_right", "19.05"))
+        self.field_top.setText(s.get("page_margin_top", "19.05"))
+        self.field_bottom.setText(s.get("page_margin_bottom", "19.05"))
 
 
 class ProtocolEditorTab(QWidget):
@@ -376,12 +413,69 @@ class SettingsDialog(QDialog):
 
         btn_row = QHBoxLayout()
         btn_row.addStretch()
+        btn_save = QPushButton("Сохранить настройки")
+        btn_save.clicked.connect(self.on_save_settings)
+        btn_row.addWidget(btn_save)
         btn_cancel = QPushButton("Отменить")
         btn_cancel.clicked.connect(self.reject)
         btn_row.addWidget(btn_cancel)
         layout.addLayout(btn_row)
 
+    def on_save_settings(self):
+        """Собирает настройки со всех вкладок и сохраняет в БД."""
+        data = {}
 
+        # Вкладка «Фильтрация пациентов»
+        tab = self.tabs.widget(0)   # FilterTab
+        if hasattr(tab, "chk_only_current"):
+            data["filter_only_current"] = "1" if tab.chk_only_current.isChecked() else "0"
+        if hasattr(tab, "chk_only_unprinted"):
+            data["filter_only_unprinted"] = "1" if tab.chk_only_unprinted.isChecked() else "0"
+
+        # Вкладка «Данные отделения»
+        tab = self.tabs.widget(1)   # OtdelenieTab
+        if hasattr(tab, "otdelenie_edit"):
+            data["otdelenie_name"] = tab.otdelenie_edit.text()
+        if hasattr(tab, "zaved_edit"):
+            data["otdelenie_head"] = tab.zaved_edit.text()
+
+        # Вкладка «Документ»
+        tab = self.tabs.widget(2)   # DocumentTab
+        if hasattr(tab, "zagolovok_edit"):
+            data["document_title"] = tab.zagolovok_edit.text()
+        if hasattr(tab, "rb_proto_html") and hasattr(tab, "rb_proto_rtf"):
+            data["format_protocol"] = "html" if tab.rb_proto_html.isChecked() else "rtf"
+        if hasattr(tab, "rb_rep_html") and hasattr(tab, "rb_rep_excel") and hasattr(tab, "rb_rep_rtf"):
+            if tab.rb_rep_html.isChecked():
+                data["format_report"] = "html"
+            elif tab.rb_rep_excel.isChecked():
+                data["format_report"] = "excel"
+            else:
+                data["format_report"] = "rtf"
+        if hasattr(tab, "verh_kolont") and hasattr(tab, "nizh_kolont"):
+            data["kartoteka_header"] = tab.verh_kolont.text()
+            data["kartoteka_footer"] = tab.nizh_kolont.text()
+        if hasattr(tab, "rb_knizh") and hasattr(tab, "rb_albom"):
+            data["kartoteka_orientation"] = "portrait" if tab.rb_knizh.isChecked() else "landscape"
+        if hasattr(tab, "field_left"):
+            data["page_margin_left"] = tab.field_left.text()
+            data["page_margin_right"] = tab.field_right.text()
+            data["page_margin_top"] = tab.field_top.text()
+            data["page_margin_bottom"] = tab.field_bottom.text()
+
+        # Вкладка «Редактор протокола»
+        tab = self.tabs.widget(3)   # ProtocolEditorTab
+        if hasattr(tab, "rb_list") and hasattr(tab, "rb_two_pages"):
+            data["protocol_style"] = "list" if tab.rb_list.isChecked() else "two_pages"
+
+        # Сохраняем в БД
+        ok = save_settings(data)
+        if ok:
+            QMessageBox.information(self, "Сохранено", "Настройки сохранены.")
+            self.accept()
+        else:
+            QMessageBox.critical(self, "Ошибка", "Не удалось сохранить настройки.")
+            
 if __name__ == "__main__":
     from PyQt6.QtWidgets import QApplication
     app = QApplication(sys.argv)

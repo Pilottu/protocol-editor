@@ -274,7 +274,6 @@ def test_connection(cfg: dict) -> tuple[bool, str]:
 
 
 def make_backup(cfg: dict, backup_path: str) -> tuple[bool, str]:
-    """Делает BACKUP DATABASE в указанный файл."""
     import os
     try:
         backup_dir = os.path.dirname(backup_path)
@@ -295,22 +294,7 @@ def make_backup(cfg: dict, backup_path: str) -> tuple[bool, str]:
 
         safe_path = backup_path.replace("'", "''")
         sql = f"BACKUP DATABASE [{db_name}] TO DISK = N'{safe_path}' WITH INIT"
-
-        print("[DEBUG] make_backup: SQL =", sql)
         cur.execute(sql)
-        print("[DEBUG] make_backup: rowcount =", cur.rowcount)
-
-        # Получаем все сообщения от SQL Server
-        try:
-            while True:
-                if cur.messages:
-                    for msg in cur.messages:
-                        print("[DEBUG] SQL Server:", msg)
-                if not cur.nextset():
-                    break
-        except Exception as e:
-            print("[DEBUG] messages error:", e)
-
         conn.close()
 
         if not os.path.exists(backup_path):
@@ -318,9 +302,8 @@ def make_backup(cfg: dict, backup_path: str) -> tuple[bool, str]:
 
         return True, f"Бэкап сохранён: {backup_path}"
     except Exception as e:
-        import traceback
-        traceback.print_exc()
         return False, str(e)
+
 
 def restore_backup(cfg: dict, backup_path: str) -> tuple[bool, str]:
     """Восстанавливает базу из .bak-файла с MOVE."""
@@ -339,8 +322,6 @@ def restore_backup(cfg: dict, backup_path: str) -> tuple[bool, str]:
         cur = conn.cursor()
         db_name = cfg["database"]
 
-        # Reuse the database entry so RESTORE WITH REPLACE can recover an
-        # interrupted restore without detaching or deleting its files.
         cur.execute("SELECT state_desc FROM sys.databases WHERE name = ?", db_name)
         row = cur.fetchone()
         if row:
@@ -354,12 +335,10 @@ def restore_backup(cfg: dict, backup_path: str) -> tuple[bool, str]:
                     f"текущее состояние {row[0]}"
                 )
 
-        # Пути для MOVE
         data_dir = os.path.dirname(backup_path)
         mdf_path = os.path.join(data_dir, f"{db_name}.mdf")
         ldf_path = os.path.join(data_dir, f"{db_name}_log.ldf")
 
-        # Восстанавливаем с MOVE
         safe_backup = backup_path.replace("'", "''")
         safe_mdf = mdf_path.replace("'", "''")
         safe_ldf = ldf_path.replace("'", "''")
@@ -411,6 +390,7 @@ def restore_backup(cfg: dict, backup_path: str) -> tuple[bool, str]:
         if conn is not None:
             conn.close()
 
+
 # =========================================================
 #  ПАЦИЕНТЫ
 # =========================================================
@@ -435,7 +415,6 @@ def update_patsient(patsient_id: int, data: dict) -> bool:
 
 
 def insert_patsient(data: dict) -> int:
-    """Добавляет нового пациента. Возвращает PatsientID."""
     with get_connection() as conn:
         cur = conn.cursor()
         cur.execute("SELECT ISNULL(MAX(PatsientID), 0) + 1 FROM Patsient")
@@ -516,7 +495,6 @@ def update_protocol(protocol_id: int, data: dict) -> bool:
 
 
 def insert_protocol(data: dict) -> int:
-    """Добавляет новый протокол. Возвращает ProtocolID."""
     with get_connection() as conn:
         cur = conn.cursor()
         cur.execute("SELECT ISNULL(MAX(ProtocolID), 0) + 1 FROM Protocol")
@@ -633,7 +611,6 @@ def delete_zakluchenie(zakl_id: int) -> bool:
 # =========================================================
 
 def insert_vrach_type_if_missing(fio: str) -> int:
-    """Возвращает VrachTypeID. Если ФИО нет — создаёт запись."""
     fio = fio.strip()
     with get_connection() as conn:
         cur = conn.cursor()
@@ -704,3 +681,121 @@ def delete_vrach_type(vrach_type_id: int) -> bool:
         cur.execute("DELETE FROM VrachType WHERE VrachTypeID = ?", [vrach_type_id])
         conn.commit()
     return True
+
+
+# =========================================================
+#  НАСТРОЙКИ (таблица Settings)
+# =========================================================
+
+def ensure_settings_table() -> bool:
+    """Создаёт таблицу Settings, если её нет."""
+    try:
+        with get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("""
+                IF OBJECT_ID('Settings', 'U') IS NULL
+                BEGIN
+                    CREATE TABLE Settings (
+                        SettingKey NVARCHAR(100) NOT NULL PRIMARY KEY,
+                        SettingValue NVARCHAR(MAX) NULL
+                    );
+                END
+            """)
+            conn.commit()
+        return True
+    except Exception as e:
+        print(f"[ERROR] ensure_settings_table: {e}")
+        return False
+
+
+DEFAULT_SETTINGS = {
+    "format_protocol": "html",
+    "format_report": "html",
+    "kartoteka_orientation": "portrait",
+    "page_margin_left": "19.05",
+    "page_margin_right": "19.05",
+    "page_margin_top": "19.05",
+    "page_margin_bottom": "19.05",
+    "kartoteka_header": "&w&bPage &p of &P",
+    "kartoteka_footer": "&u&b&d",
+    "document_title": "",
+    "filter_letter": "",
+    "filter_only_current": "0",
+    "filter_only_unprinted": "0",
+    "otdelenie_name": "",
+    "otdelenie_head": "",
+    "protocol_style": "two_pages",
+}
+
+
+def get_setting(key: str, default: str = "") -> str:
+    try:
+        with get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT SettingValue FROM Settings WHERE SettingKey = ?", [key])
+            row = cur.fetchone()
+            return row[0] if row else default
+    except Exception:
+        return default
+
+
+def set_setting(key: str, value: str) -> bool:
+    try:
+        with get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT 1 FROM Settings WHERE SettingKey = ?", [key])
+            if cur.fetchone():
+                cur.execute(
+                    "UPDATE Settings SET SettingValue = ? WHERE SettingKey = ?",
+                    [str(value), key]
+                )
+            else:
+                cur.execute(
+                    "INSERT INTO Settings (SettingKey, SettingValue) VALUES (?, ?)",
+                    [key, str(value)]
+                )
+            conn.commit()
+        return True
+    except Exception as e:
+        print(f"[ERROR] set_setting({key}): {e}")
+        return False
+
+
+def get_all_settings() -> dict:
+    try:
+        with get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT SettingKey, SettingValue FROM Settings")
+            return {row[0]: row[1] for row in cur.fetchall()}
+    except Exception:
+        return {}
+
+
+def save_settings(data: dict) -> bool:
+    try:
+        with get_connection() as conn:
+            cur = conn.cursor()
+            for key, value in data.items():
+                cur.execute("SELECT 1 FROM Settings WHERE SettingKey = ?", [key])
+                if cur.fetchone():
+                    cur.execute(
+                        "UPDATE Settings SET SettingValue = ? WHERE SettingKey = ?",
+                        [str(value), key]
+                    )
+                else:
+                    cur.execute(
+                        "INSERT INTO Settings (SettingKey, SettingValue) VALUES (?, ?)",
+                        [key, str(value)]
+                    )
+            conn.commit()
+        return True
+    except Exception as e:
+        print(f"[ERROR] save_settings: {e}")
+        return False
+
+
+def get_settings_with_defaults() -> dict:
+    saved = get_all_settings()
+    result = DEFAULT_SETTINGS.copy()
+    result.update(saved)
+    return result

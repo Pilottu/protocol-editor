@@ -335,6 +335,11 @@ class MainWindow(QMainWindow):
             self.is_connected = True
             self.status_label.setText("✅ Подключено к базе")
             self.status_label.setStyleSheet("color: green;")
+
+            # Создаём таблицу Settings, если её нет
+            from db import ensure_settings_table
+            ensure_settings_table()
+
             self._load_references()
             self._load_tree()
         except Exception as e:
