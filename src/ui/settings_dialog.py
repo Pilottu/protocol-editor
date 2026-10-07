@@ -89,23 +89,12 @@ class DocumentTab(QWidget):
         formats_row = QHBoxLayout()
         proto_group = QGroupBox("Формат протокола")
         proto_layout = QVBoxLayout(proto_group)
-        self.rb_proto_html = QRadioButton("Microsoft Internet Explorer (HTML)")
-        self.rb_proto_rtf = QRadioButton("Microsoft Word (RTF)")
+        self.rb_proto_html = QRadioButton("Internet Explorer")
+        self.rb_proto_rtf = QRadioButton("Microsoft Word")
         self.rb_proto_html.setChecked(True)
         proto_layout.addWidget(self.rb_proto_html)
         proto_layout.addWidget(self.rb_proto_rtf)
         formats_row.addWidget(proto_group)
-
-        report_group = QGroupBox("Формат отчета")
-        report_layout = QVBoxLayout(report_group)
-        self.rb_rep_html = QRadioButton("Microsoft Internet Explorer (HTML)")
-        self.rb_rep_excel = QRadioButton("Microsoft Excel (HTML)")
-        self.rb_rep_rtf = QRadioButton("Microsoft Word (RTF)")
-        self.rb_rep_html.setChecked(True)
-        report_layout.addWidget(self.rb_rep_html)
-        report_layout.addWidget(self.rb_rep_excel)
-        report_layout.addWidget(self.rb_rep_rtf)
-        formats_row.addWidget(report_group)
         layout.addLayout(formats_row)
 
         page_group = QGroupBox("Параметры страницы (для Internet Explorer)")
@@ -169,14 +158,6 @@ class DocumentTab(QWidget):
         else:
             self.rb_proto_rtf.setChecked(True)
 
-        fmt = s.get("format_report", "html")
-        if fmt == "html":
-            self.rb_rep_html.setChecked(True)
-        elif fmt == "excel":
-            self.rb_rep_excel.setChecked(True)
-        else:
-            self.rb_rep_rtf.setChecked(True)
-
         self.verh_kolont.setText(s.get("kartoteka_header", "&w&bPage &p of &P"))
         self.nizh_kolont.setText(s.get("kartoteka_footer", "&u&b&d"))
 
@@ -213,7 +194,7 @@ class ReportSettingsTab(QWidget):
         form_group = QGroupBox("Выберите форму отчета")
         form_layout = QVBoxLayout(form_group)
         self.rb_nagruzka = QRadioButton("Нагрузка")
-        self.rb_nozologia = QRadioButton("Нозология")
+        self.rb_nozologia = QRadioButton("Гистология")
         self.rb_nagruzka.setChecked(True)
         form_layout.addWidget(self.rb_nagruzka)
         form_layout.addWidget(self.rb_nozologia)
@@ -242,14 +223,6 @@ class ReportSettingsTab(QWidget):
         date_form.addRow("Отчетный месяц", self.month_combo)
         layout.addLayout(date_form)
 
-        btn_row = QHBoxLayout()
-        btn_ok = QPushButton("OK")
-        btn_cancel = QPushButton("Отменить")
-        btn_row.addStretch()
-        btn_row.addWidget(btn_ok)
-        btn_row.addWidget(btn_cancel)
-        btn_row.addStretch()
-        layout.addLayout(btn_row)
         layout.addStretch()
 
 
@@ -402,7 +375,6 @@ class SettingsDialog(QDialog):
         layout = QVBoxLayout(self)
 
         self.tabs = QTabWidget()
-        self.tabs.addTab(FilterTab(), "Фильтрация пациентов")
         self.tabs.addTab(OtdelenieTab(), "Данные отделения")
         self.tabs.addTab(DocumentTab(), "Документ")
         self.tabs.addTab(ProtocolEditorTab(), "Редактор протокола")
@@ -425,33 +397,19 @@ class SettingsDialog(QDialog):
         """Собирает настройки со всех вкладок и сохраняет в БД."""
         data = {}
 
-        # Вкладка «Фильтрация пациентов»
-        tab = self.tabs.widget(0)   # FilterTab
-        if hasattr(tab, "chk_only_current"):
-            data["filter_only_current"] = "1" if tab.chk_only_current.isChecked() else "0"
-        if hasattr(tab, "chk_only_unprinted"):
-            data["filter_only_unprinted"] = "1" if tab.chk_only_unprinted.isChecked() else "0"
-
-        # Вкладка «Данные отделения»
-        tab = self.tabs.widget(1)   # OtdelenieTab
+        # Вкладка «Данные отделения» (индекс 0)
+        tab = self.tabs.widget(0)   # OtdelenieTab
         if hasattr(tab, "otdelenie_edit"):
             data["otdelenie_name"] = tab.otdelenie_edit.text()
         if hasattr(tab, "zaved_edit"):
             data["otdelenie_head"] = tab.zaved_edit.text()
 
-        # Вкладка «Документ»
-        tab = self.tabs.widget(2)   # DocumentTab
+        # Вкладка «Документ» (индекс 1)
+        tab = self.tabs.widget(1)   # DocumentTab
         if hasattr(tab, "zagolovok_edit"):
             data["document_title"] = tab.zagolovok_edit.text()
         if hasattr(tab, "rb_proto_html") and hasattr(tab, "rb_proto_rtf"):
             data["format_protocol"] = "html" if tab.rb_proto_html.isChecked() else "rtf"
-        if hasattr(tab, "rb_rep_html") and hasattr(tab, "rb_rep_excel") and hasattr(tab, "rb_rep_rtf"):
-            if tab.rb_rep_html.isChecked():
-                data["format_report"] = "html"
-            elif tab.rb_rep_excel.isChecked():
-                data["format_report"] = "excel"
-            else:
-                data["format_report"] = "rtf"
         if hasattr(tab, "verh_kolont") and hasattr(tab, "nizh_kolont"):
             data["kartoteka_header"] = tab.verh_kolont.text()
             data["kartoteka_footer"] = tab.nizh_kolont.text()
@@ -463,8 +421,8 @@ class SettingsDialog(QDialog):
             data["page_margin_top"] = tab.field_top.text()
             data["page_margin_bottom"] = tab.field_bottom.text()
 
-        # Вкладка «Редактор протокола»
-        tab = self.tabs.widget(3)   # ProtocolEditorTab
+        # Вкладка «Редактор протокола» (индекс 2)
+        tab = self.tabs.widget(2)   # ProtocolEditorTab
         if hasattr(tab, "rb_list") and hasattr(tab, "rb_two_pages"):
             data["protocol_style"] = "list" if tab.rb_list.isChecked() else "two_pages"
 

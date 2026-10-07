@@ -39,6 +39,9 @@ from db import (
 
 
 class MainWindow(QMainWindow):
+    def on_filter_changed(self, _index):
+        """При смене исследования — перезагружаем дерево."""
+        self._load_tree()
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Редактор протоколов (Python)")
@@ -59,7 +62,7 @@ class MainWindow(QMainWindow):
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
 
-        # --- Дерево ---
+                # --- Левая панель: дерево ---
         self.tree = QTreeView()
         self.tree_model = QStandardItemModel()
         self.tree_model.setHorizontalHeaderLabels(["Исследование / Пациент / Протокол"])
@@ -89,6 +92,7 @@ class MainWindow(QMainWindow):
         right_layout.addLayout(top_form)
 
         self.fio_edit.textChanged.connect(self.on_fio_changed)
+        self.issledovanie_combo.currentIndexChanged.connect(self.on_filter_changed)
 
         # --- Вкладки ---
         self.tabs = QTabWidget()
@@ -313,10 +317,8 @@ class MainWindow(QMainWindow):
 
         actions = [
             ("Настройки", self.on_settings),
-            ("Переподключиться", self.on_reconnect),
             ("Отчёт", self.on_report),
             ("Снимки", self.on_snapshots),
-            ("Проверить", self.on_check),
             ("Печать", self.on_print),
             ("Шаблоны", self.on_templates),
             ("Редактор шаблонов", self.on_templates_edit),
@@ -433,7 +435,14 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Ошибка", f"Не удалось загрузить дерево:\n{e}")
             return
 
+         # Фильтр по исследованию (из правого комбо)
+        filter_iss_id = self.issledovanie_combo.currentData()
+
         for iss in data:
+            # Если выбрано конкретное исследование — фильтруем
+            if filter_iss_id and iss["issledovanie_id"] != filter_iss_id:
+                continue
+
             iss_item = QStandardItem(iss["issledovanie_name"])
             iss_item.setEditable(False)
             iss_item.setData(
@@ -460,7 +469,9 @@ class MainWindow(QMainWindow):
                 iss_item.appendRow(pat_item)
             self.tree_model.appendRow(iss_item)
 
-        self.tree.expandAll()
+        # Разворачиваем только первый уровень (исследования)
+        self.tree.expandToDepth(0)
+
         self.status_label.setText(
             f"✅ Подключено. Исследований: {self.tree_model.rowCount()}"
         )
@@ -547,13 +558,30 @@ class MainWindow(QMainWindow):
             return
 
         if data.get("type") == "protocol":
+            # Клик на протокол — загружаем
             self.current_protocol_id = data["id"]
             self._load_protocol(data["id"])
             self._update_ui_state()
+
         elif data.get("type") == "patsient":
+            # Клик на пациента — разворачиваем его протоколы
             self.current_patient_id = data["id"]
             self.current_protocol_id = None
 
+            # Сворачиваем всех, кроме этого
+            for i in range(self.tree_model.rowCount()):
+                iss_item = self.tree_model.item(i)
+                if iss_item is item.parent():
+                    # Разворачиваем этого пациента
+                    self.tree.expand(index)
+                else:
+                    # Сворачиваем остальных пациентов
+                    for j in range(iss_item.rowCount()):
+                        pat_item = iss_item.child(j)
+                        if pat_item is not item:
+                            self.tree.collapse(self.tree_model.indexFromItem(pat_item))
+
+            # Автоподстановка исследования из родителя
             parent_item = item.parent()
             if parent_item:
                 parent_data = parent_item.data(Qt.ItemDataRole.UserRole)
@@ -564,7 +592,16 @@ class MainWindow(QMainWindow):
                             self.issledovanie_combo.setCurrentIndex(i)
                             break
             self._update_ui_state()
+
         elif data.get("type") == "issledovanie":
+            # Клик на исследование — разворачиваем его, остальные сворачиваем
+            for i in range(self.tree_model.rowCount()):
+                iss_item = self.tree_model.item(i)
+                iss_index = self.tree_model.indexFromItem(iss_item)
+                if iss_item is item:
+                    self.tree.expand(iss_index)
+                else:
+                    self.tree.collapse(iss_index)
             self.statusBar().showMessage(f"Выбрано исследование: {item.text()}")
 
     def _load_protocol(self, protocol_id: int):
