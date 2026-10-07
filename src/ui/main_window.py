@@ -1344,6 +1344,19 @@ class MainWindow(QMainWindow):
 
 def run():
     app = QApplication(sys.argv)
+
+    # Глобальный перехват исключений
+    def excepthook(exc_type, exc_value, exc_tb):
+        import traceback
+        tb = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
+        print("[FATAL]", tb)
+        try:
+            QMessageBox.critical(None, "Критическая ошибка", tb)
+        except Exception:
+            pass
+
+    sys.excepthook = excepthook
+
     w = MainWindow()
     w.showMaximized()
     sys.exit(app.exec())

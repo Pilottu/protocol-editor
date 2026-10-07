@@ -732,6 +732,10 @@ DEFAULT_SETTINGS = {
     "otdelenie_name": "",
     "otdelenie_head": "",
     "protocol_style": "two_pages",
+    "report_form": "nagruzka",       # nagruzka | gistologia
+    "report_period": "month",        # month | year
+    "report_year": "2025",
+    "report_month": "10",
 }
 
 

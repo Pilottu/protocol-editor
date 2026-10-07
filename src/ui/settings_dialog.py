@@ -417,9 +417,20 @@ class SettingsDialog(QDialog):
             data["page_margin_bottom"] = tab.field_bottom.text()
 
         # Вкладка «Редактор протокола» (индекс 2)
-        tab = self.tabs.widget(2)   # ProtocolEditorTab
+        tab = self.tabs.widget(2)
         if hasattr(tab, "rb_list") and hasattr(tab, "rb_two_pages"):
             data["protocol_style"] = "list" if tab.rb_list.isChecked() else "two_pages"
+
+        # Вкладка «Настройки отчёта» (индекс 3)
+        tab = self.tabs.widget(3)
+        if hasattr(tab, "rb_nagruzka") and hasattr(tab, "rb_nozologia"):
+            data["report_form"] = "gistologia" if tab.rb_nozologia.isChecked() else "nagruzka"
+        if hasattr(tab, "rb_month") and hasattr(tab, "rb_year"):
+            data["report_period"] = "year" if tab.rb_year.isChecked() else "month"
+        if hasattr(tab, "year_spin"):
+            data["report_year"] = str(tab.year_spin.value())
+        if hasattr(tab, "month_combo"):
+            data["report_month"] = str(tab.month_combo.currentIndex() + 1)
 
         # Сохраняем в БД
         ok = save_settings(data)
