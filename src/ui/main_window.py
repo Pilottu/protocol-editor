@@ -5,10 +5,12 @@ from PyQt6.QtWidgets import (
     QSplitter, QTreeView, QTabWidget, QFormLayout, QLineEdit,
     QComboBox, QDateEdit, QTextEdit, QPushButton, QLabel,
     QToolBar, QMessageBox, QListWidget, QListWidgetItem,
-    QGroupBox, QCheckBox, QInputDialog, QTimeEdit
+    QGroupBox, QCheckBox, QInputDialog, QTimeEdit,
+    QSpinBox
 )
 from PyQt6.QtGui import QStandardItemModel, QStandardItem, QAction
 from PyQt6.QtCore import Qt, QDate, QTime
+
 
 sys.path.insert(0, r"E:\Prog\Piton\src")
 from db import (
@@ -228,15 +230,20 @@ class MainWindow(QMainWindow):
         layout.addWidget(QLabel("Текст протокола:"))
         layout.addWidget(self.protocol_text, stretch=3)
 
-        # Заключения
+        # Заключения (как блок «Врач» — с combo для выбора из справочника)
         zakl_group = QGroupBox("Заключение")
         zakl_layout = QHBoxLayout(zakl_group)
         self.zakl_list = QListWidget()
         zakl_btn_layout = QVBoxLayout()
+        # Combo для выбора существующего заключения
+        self.zakl_combo = QComboBox()
+        self.zakl_combo.setEditable(True)
+        zakl_btn_layout.addWidget(self.zakl_combo)
         self.btn_zakl_add = QPushButton("Добавить")
         self.btn_zakl_edit = QPushButton("Изменить")
         self.btn_zakl_del = QPushButton("Удалить")
         for b in [self.btn_zakl_add, self.btn_zakl_edit, self.btn_zakl_del]:
+            b.setFixedWidth(400)          # ← фиксированная ширина
             zakl_btn_layout.addWidget(b)
         zakl_btn_layout.addStretch()
         zakl_layout.addWidget(self.zakl_list, stretch=1)
@@ -255,6 +262,7 @@ class MainWindow(QMainWindow):
         self.btn_vrach_del = QPushButton("Удалить")
         vrach_btn_layout.addWidget(self.vrach_combo)
         for b in [self.btn_vrach_add, self.btn_vrach_edit, self.btn_vrach_del]:
+            b.setFixedWidth(400)          # ← та же ширина
             vrach_btn_layout.addWidget(b)
         vrach_btn_layout.addStretch()
         vrach_layout.addWidget(self.vrach_list, stretch=1)
@@ -379,7 +387,6 @@ class MainWindow(QMainWindow):
         self.issledovanie_combo.clear()
         self.gruppa_combo.clear()
         self.apparat_combo.clear()
-        self.otdelenie_podr_combo.clear()
         self.vrach_combo.clear()
         self.anestezia_combo.clear()
         self.zakl_list.clear()
@@ -411,10 +418,7 @@ class MainWindow(QMainWindow):
         for id_, name in refs.get("Apparat", []):
             self.apparat_combo.addItem(name, id_)
 
-        self.otdelenie_podr_combo.clear()
-        self.otdelenie_podr_combo.addItem("", None)
-        for id_, name in refs.get("Otdelenie", []):
-            self.otdelenie_podr_combo.addItem(name, id_)
+        # otdelenie_podr_combo удалён — поле «Направление оформлено» стало QLineEdit
 
         current_vrach = self.vrach_combo.currentText() if hasattr(self, "vrach_combo") else ""
         self.vrach_combo.clear()
@@ -439,6 +443,19 @@ class MainWindow(QMainWindow):
             pass
         if current_anest:
             self.anestezia_combo.setCurrentText(current_anest)
+
+        # Справочник заключений
+        current_zakl = self.zakl_combo.currentText() if hasattr(self, "zakl_combo") else ""
+        self.zakl_combo.clear()
+        self.zakl_combo.setEditable(True)
+        self.zakl_combo.addItem("", None)
+        try:
+            for text in get_distinct_zakluchenia():
+                self.zakl_combo.addItem(text, text)
+        except Exception:
+            pass
+        if current_zakl:
+            self.zakl_combo.setCurrentText(current_zakl)
 
     # =========================================================
     #  Дерево
@@ -893,7 +910,7 @@ class MainWindow(QMainWindow):
     def _current_protocol_data(self, patsient_id: int) -> dict:
         iss_id = self.issledovanie_combo.currentData()
         app_id = self.apparat_combo.currentData()
-        otd_id = self.otdelenie_podr_combo.currentData()
+        otd_id = None   # поле удалено
 
         d = self.date_edit.date()
         protocol_date = datetime.datetime(d.year(), d.month(), d.day())
@@ -1044,19 +1061,17 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Нет протокола", "Сначала сохраните протокол.")
             return
 
-        texts = get_distinct_zakluchenia()
-        text, ok = QInputDialog.getItem(
-            self, "Новое заключение", "Текст заключения:",
-            texts, 0, True
-        )
-        if not ok or not text.strip():
+        text = self.zakl_combo.currentText().strip()
+        if not text:
+            QMessageBox.warning(self, "Пусто", "Выберите или введите текст заключения.")
             return
 
         order = self.zakl_list.count() + 1
         iss_id = self.issledovanie_combo.currentData()
         try:
-            insert_zakluchenie(self.current_protocol_id, text.strip(), order, iss_id)
+            insert_zakluchenie(self.current_protocol_id, text, order, iss_id)
             self._reload_zakluchenia()
+            self.zakl_combo.setCurrentText("")
         except Exception as e:
             QMessageBox.critical(self, "Ошибка", f"Не удалось добавить:\n{e}")
 
@@ -1209,7 +1224,97 @@ class MainWindow(QMainWindow):
         QMessageBox.information(self, "Поиск", "Сложный поиск (в разработке)")
 
     def on_report(self):
-        QMessageBox.information(self, "Отчёт", "Отчёты (в разработке)")
+        """Диалог выбора отчёта и периода, запуск."""
+        from PyQt6.QtWidgets import QDialog, QDialogButtonBox
+        from PyQt6.QtCore import QDate
+        from reports import run_report
+        from db import get_setting, set_setting
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Настройки отчёта")
+        dlg.resize(400, 260)
+
+        layout = QVBoxLayout(dlg)
+
+        # Форма отчёта
+        form_group = QGroupBox("Выберите форму отчёта")
+        form_layout = QVBoxLayout(form_group)
+        rb_nagruzka = QRadioButton("Нагрузка")
+        rb_gistologia = QRadioButton("Гистология")
+        form_layout.addWidget(rb_nagruzka)
+        form_layout.addWidget(rb_gistologia)
+        layout.addWidget(form_group)
+
+        # Периодичность
+        period_group = QGroupBox("Выберите периодичность")
+        period_layout = QVBoxLayout(period_group)
+        rb_month = QRadioButton("Месячный")
+        rb_year = QRadioButton("Годовой")
+        period_layout.addWidget(rb_month)
+        period_layout.addWidget(rb_year)
+        layout.addWidget(period_group)
+
+        # Год / месяц
+        date_form = QFormLayout()
+        year_spin = QSpinBox()
+        year_spin.setRange(2000, 2100)
+        year_spin.setValue(QDate.currentDate().year())
+        month_combo = QComboBox()
+        month_combo.addItems([
+            "январь", "февраль", "март", "апрель", "май", "июнь",
+            "июль", "август", "сентябрь", "октябрь", "ноябрь", "декабрь"
+        ])
+        month_combo.setCurrentIndex(QDate.currentDate().month() - 1)
+        date_form.addRow("Отчётный год", year_spin)
+        date_form.addRow("Отчётный месяц", month_combo)
+        layout.addLayout(date_form)
+
+        # Загружаем сохранённые настройки
+        try:
+            saved_form = get_setting("report_form", "nagruzka")
+            saved_period = get_setting("report_period", "month")
+            if saved_form == "gistologia":
+                rb_gistologia.setChecked(True)
+            else:
+                rb_nagruzka.setChecked(True)
+            if saved_period == "year":
+                rb_year.setChecked(True)
+            else:
+                rb_month.setChecked(True)
+        except Exception:
+            rb_nagruzka.setChecked(True)
+            rb_month.setChecked(True)
+
+        # Кнопки
+        btn_box = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        btn_box.accepted.connect(dlg.accept)
+        btn_box.rejected.connect(dlg.reject)
+        layout.addWidget(btn_box)
+
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        # Сохраняем настройки
+        form = "gistologia" if rb_gistologia.isChecked() else "nagruzka"
+        period = "year" if rb_year.isChecked() else "month"
+        try:
+            set_setting("report_form", form)
+            set_setting("report_period", period)
+        except Exception:
+            pass
+
+        year = year_spin.value()
+        month = month_combo.currentIndex() + 1 if period == "month" else None
+
+        try:
+            path = run_report(form, year, month)
+            self.statusBar().showMessage(f"Отчёт сохранён: {path}")
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            QMessageBox.critical(self, "Ошибка", f"Не удалось сформировать отчёт:\n{e}")
 
     def on_snapshots(self):
         QMessageBox.information(self, "Снимки", "Модуль снимков (в разработке)")

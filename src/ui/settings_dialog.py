@@ -58,21 +58,16 @@ class OtdelenieTab(QWidget):
         form.addRow("Отделение", self.otdelenie_edit)
         form.addRow("Заведующий", self.zaved_edit)
         layout.addLayout(form)
-        btn_save = QPushButton("Сохранить изменения")
-        btn_save.setFixedWidth(180)
-        layout.addWidget(btn_save, alignment=Qt.AlignmentFlag.AlignCenter)
+        # Кнопка «Сохранить изменения» убрана — сохранение через «Сохранить настройки» внизу диалога
         layout.addStretch()
         self._load()
 
     def _load(self):
+        """Загружает данные отделения из таблицы Settings."""
         try:
-            with get_connection() as conn:
-                cur = conn.cursor()
-                cur.execute("SELECT TOP 1 OtdelenieName, OtdelenieHead FROM Otdelenie")
-                row = cur.fetchone()
-                if row:
-                    self.otdelenie_edit.setText(row[0] or "")
-                    self.zaved_edit.setText(row[1] or "")
+            s = get_settings_with_defaults()
+            self.otdelenie_edit.setText(s.get("otdelenie_name", ""))
+            self.zaved_edit.setText(s.get("otdelenie_head", ""))
         except Exception as e:
             QMessageBox.warning(self, "Ошибка", f"Не удалось загрузить данные отделения:\n{e}")
 
