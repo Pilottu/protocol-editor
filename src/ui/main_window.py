@@ -6,7 +6,7 @@ from PyQt6.QtWidgets import (
     QComboBox, QDateEdit, QTextEdit, QPushButton, QLabel,
     QToolBar, QMessageBox, QListWidget, QListWidgetItem,
     QGroupBox, QCheckBox, QInputDialog, QTimeEdit,
-    QSpinBox
+    QRadioButton, QSpinBox, QDialog, QDialogButtonBox
 )
 from PyQt6.QtGui import QStandardItemModel, QStandardItem, QAction
 from PyQt6.QtCore import Qt, QDate, QTime
@@ -1258,13 +1258,20 @@ class MainWindow(QMainWindow):
         date_form = QFormLayout()
         year_spin = QSpinBox()
         year_spin.setRange(2000, 2100)
-        year_spin.setValue(QDate.currentDate().year())
+        try:
+            year_spin.setValue(int(get_setting("report_year", str(QDate.currentDate().year()))))
+        except Exception:
+            year_spin.setValue(QDate.currentDate().year())
+
         month_combo = QComboBox()
         month_combo.addItems([
             "январь", "февраль", "март", "апрель", "май", "июнь",
             "июль", "август", "сентябрь", "октябрь", "ноябрь", "декабрь"
         ])
-        month_combo.setCurrentIndex(QDate.currentDate().month() - 1)
+        try:
+            month_combo.setCurrentIndex(int(get_setting("report_month", str(QDate.currentDate().month()))) - 1)
+        except Exception:
+            month_combo.setCurrentIndex(QDate.currentDate().month() - 1)
         date_form.addRow("Отчётный год", year_spin)
         date_form.addRow("Отчётный месяц", month_combo)
         layout.addLayout(date_form)
@@ -1299,14 +1306,17 @@ class MainWindow(QMainWindow):
         # Сохраняем настройки
         form = "gistologia" if rb_gistologia.isChecked() else "nagruzka"
         period = "year" if rb_year.isChecked() else "month"
+        year = year_spin.value()
+        month_num = month_combo.currentIndex() + 1
         try:
             set_setting("report_form", form)
             set_setting("report_period", period)
+            set_setting("report_year", str(year))
+            set_setting("report_month", str(month_num))
         except Exception:
             pass
 
-        year = year_spin.value()
-        month = month_combo.currentIndex() + 1 if period == "month" else None
+        month = month_num if period == "month" else None
 
         try:
             path = run_report(form, year, month)

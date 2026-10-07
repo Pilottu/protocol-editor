@@ -220,6 +220,30 @@ class ReportSettingsTab(QWidget):
 
         layout.addStretch()
 
+        self._load_from_db()
+
+    def _load_from_db(self):
+        """Загружает сохранённые настройки отчёта из БД."""
+        s = get_settings_with_defaults()
+        if s.get("report_form") == "gistologia":
+            self.rb_nozologia.setChecked(True)
+        else:
+            self.rb_nagruzka.setChecked(True)
+        if s.get("report_period") == "year":
+            self.rb_year.setChecked(True)
+        else:
+            self.rb_month.setChecked(True)
+        try:
+            self.year_spin.setValue(int(s.get("report_year", 2026)))
+        except Exception:
+            pass
+        try:
+            m = int(s.get("report_month", 10))
+            if 1 <= m <= 12:
+                self.month_combo.setCurrentIndex(m - 1)
+        except Exception:
+            pass
+
 
 class ReferencesTab(QWidget):
     def __init__(self):
