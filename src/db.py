@@ -148,7 +148,8 @@ def get_protocol_full(protocol_id: int) -> Optional[dict]:
         SELECT 
             p.*,
             pat.FIO AS PatsientFIO, pat.Pol AS PatsientPol, pat.Karta AS PatsientKarta,
-            pat.PatsientGroupID, pg.PatsientGroupName,
+            pat.PatsientGroupID, pat.Date_Rozhd,
+            pg.PatsientGroupName,
             it.Issledovanie AS IssledovanieName,
             o.OtdelenieName AS OtdelenieName, o.OtdelenieHead,
             a.ApparatName AS ApparatName,

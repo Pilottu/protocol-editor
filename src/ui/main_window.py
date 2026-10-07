@@ -42,6 +42,18 @@ class MainWindow(QMainWindow):
     def on_filter_changed(self, _index):
         """При смене исследования — перезагружаем дерево."""
         self._load_tree()
+    def _recalc_vozrast(self, _date=None):
+        """Пересчитывает возраст по дате рождения и дате протокола."""
+        birth = self.datebirth_edit.date()
+        proto = self.date_edit.date()
+        if birth.year() == 1980 and birth.month() == 1 and birth.day() == 1:
+            return  # дефолт — не считаем
+        years = proto.year() - birth.year()
+        if (proto.month(), proto.day()) < (birth.month(), birth.day()):
+            years -= 1
+        if years < 0:
+            years = 0
+        self.vozrast_edit.setText(str(years))    
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Редактор протоколов (Python)")
@@ -144,38 +156,39 @@ class MainWindow(QMainWindow):
         w = QWidget()
         form = QFormLayout(w)
 
-        self.organizatsia_edit = QLineEdit()
-        self.otdelenie_edit = QLineEdit()
-        self.issledovanie_edit = QLineEdit()
+        # Организация, Отделение, Исследование — убраны (#4)
         self.nomer_edit = QLineEdit()
         self.date_edit = QDateEdit()
         self.date_edit.setCalendarPopup(True)
         self.date_edit.setDate(QDate.currentDate())
-        self.fio_shapka_edit = QLineEdit()
+        # Ф.И.О. → Дата рождения (#5)
+        self.datebirth_edit = QDateEdit()
+        self.datebirth_edit.setCalendarPopup(True)
+        self.datebirth_edit.setDate(QDate(1980, 1, 1))
         self.vozrast_edit = QLineEdit()
+        self.vozrast_edit.setReadOnly(True)          # возраст только для чтения
         self.pol_shapka_edit = QLineEdit()
         self.adres_edit = QLineEdit()
         self.karta_shapka_edit = QLineEdit()
         self.istor_edit = QLineEdit()
-        self.otdelenie_podr_combo = QComboBox()
+        # Отделение (подраздел.) → Направление оформлено (#6)
+        self.napravlenie_edit = QLineEdit()          # editable
         self.anamnez_edit = QLineEdit()
         self.apparat_combo = QComboBox()
+        self.apparat_combo.setEditable(True)         # editable, как Анестезия (#7)
         self.anestezia_combo = QComboBox()
 
-        form.addRow("Организация", self.organizatsia_edit)
-        form.addRow("Отделение организации", self.otdelenie_edit)
-        form.addRow("Исследование", self.issledovanie_edit)
         form.addRow("Протокол №", self.nomer_edit)
         form.addRow("Дата", self.date_edit)
-        form.addRow("Ф.И.О.", self.fio_shapka_edit)
-        form.addRow("Возраст", self.vozrast_edit)
+        form.addRow("Дата рождения", self.datebirth_edit)       # (#5)
+        form.addRow("Возраст", self.vozrast_edit)                # (#5)
         form.addRow("Пол", self.pol_shapka_edit)
         form.addRow("Адрес", self.adres_edit)
         form.addRow("Амб. карта №", self.karta_shapka_edit)
         form.addRow("История болезни №", self.istor_edit)
-        form.addRow("Отделение (подраздел.)", self.otdelenie_podr_combo)
+        form.addRow("Направление оформлено", self.napravlenie_edit)  # (#6)
         form.addRow("Анамнез", self.anamnez_edit)
-        form.addRow("Модель аппарата", self.apparat_combo)
+        form.addRow("Модель аппарата", self.apparat_combo)       # (#7)
         form.addRow("Анестезия", self.anestezia_combo)
 
         self.nomer_edit.textChanged.connect(self.on_nomer_changed)
@@ -199,6 +212,11 @@ class MainWindow(QMainWindow):
         for chk in (self.chk_biopsia, self.chk_tsitologia, self.chk_gistologia):
             chk.stateChanged.connect(self._on_biopsia_flags_changed)
 
+        # Пересчёт возраста при смене даты рождения
+        self.datebirth_edit.dateChanged.connect(self._recalc_vozrast)
+        # И при смене даты протокола (возраст на дату протокола)
+        self.date_edit.dateChanged.connect(self._recalc_vozrast)
+        
         return w
 
     def _build_text_tab(self) -> QWidget:
@@ -635,14 +653,19 @@ class MainWindow(QMainWindow):
                     self.issledovanie_combo.setCurrentIndex(i)
                     break
 
-        self.organizatsia_edit.setText(proto.get("OrganizatsiaName") or "")
-        self.otdelenie_edit.setText(proto.get("OtdelenieName") or "")
-        self.issledovanie_edit.setText(proto.get("IssledovanieName") or "")
         self._set_nomer_silent(str(proto.get("Nomer") or ""))
         if proto.get("ProtocolDate"):
             d = proto["ProtocolDate"]
             self.date_edit.setDate(QDate(d.year, d.month, d.day))
-        self.fio_shapka_edit.setText(proto.get("PatsientFIO") or "")
+
+        # Дата рождения — из Patsient.Date_Rozhd
+        if proto.get("Date_Rozhd"):
+            d = proto["Date_Rozhd"]
+            self.datebirth_edit.setDate(QDate(d.year, d.month, d.day))
+        else:
+            self.datebirth_edit.setDate(QDate(1980, 1, 1))
+
+        # Возраст — из Protocol.Vozrast (но пересчитаем заново)
         self.vozrast_edit.setText(str(proto.get("Vozrast") or ""))
         self.pol_shapka_edit.setText(proto.get("PatsientPol") or "")
         self.adres_edit.setText(proto.get("Adres") or "")
@@ -650,22 +673,24 @@ class MainWindow(QMainWindow):
         self.istor_edit.setText(str(proto.get("Istor") or ""))
         self.anamnez_edit.setText(proto.get("Anamnez") or "")
 
+        # Направление оформлено — из Protocol.Istochnik_naprav
+        self.napravlenie_edit.setText(proto.get("Istochnik_naprav") or "")
+
+        # Модель аппарата — editable combo
         app_id = proto.get("ApparatID")
         if app_id:
             for i in range(self.apparat_combo.count()):
                 if self.apparat_combo.itemData(i) == app_id:
                     self.apparat_combo.setCurrentIndex(i)
                     break
+        else:
+            self.apparat_combo.setCurrentText("")
 
         anest = proto.get("Anestezia") or ""
         self.anestezia_combo.setCurrentText(anest)
 
-        otd_id = proto.get("OtdelenieID")
-        if otd_id:
-            for i in range(self.otdelenie_podr_combo.count()):
-                if self.otdelenie_podr_combo.itemData(i) == otd_id:
-                    self.otdelenie_podr_combo.setCurrentIndex(i)
-                    break
+        # Пересчитаем возраст по дате рождения и дате протокола
+        self._recalc_vozrast()
 
         self.chk_biopsia.setChecked(proto.get("Biopsia") == "да")
         self.chk_tsitologia.setChecked(proto.get("Tsitologia") == "да")

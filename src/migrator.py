@@ -134,6 +134,11 @@ class Migrator:
         self.progress(100)
         self.log("=== Миграция завершена ===")
 
+        # Финальный шаг: создаём Date_Rozhd в Patsient и заполняем из Protocol
+        self._create_datebirth_column()
+        self._create_istochnik_naprav_column()
+        self._fill_datebirth()
+
     # -----------------------------------------------------
 
     def _create_and_move_database(self):
@@ -145,15 +150,41 @@ class Migrator:
         cur.execute("SELECT name FROM sys.databases WHERE name = ?", self.sql_database)
         if cur.fetchone():
             self.log(f"  База '{self.sql_database}' существует — удаляю")
-            try:
-                cur.execute(
-                    f"ALTER DATABASE [{self.sql_database}] "
-                    f"SET SINGLE_USER WITH ROLLBACK IMMEDIATE"
+            dropped = False
+            for attempt in range(3):
+                try:
+                    cur.execute(
+                        f"ALTER DATABASE [{self.sql_database}] "
+                        f"SET SINGLE_USER WITH ROLLBACK IMMEDIATE"
+                    )
+                except Exception:
+                    pass
+                # OFFLINE освобождает файлы (даже если их нет)
+                try:
+                    cur.execute(
+                        f"ALTER DATABASE [{self.sql_database}] "
+                        f"SET OFFLINE WITH ROLLBACK IMMEDIATE"
+                    )
+                except Exception:
+                    pass
+                try:
+                    cur.execute(f"DROP DATABASE [{self.sql_database}]")
+                    dropped = True
+                    break
+                except Exception as e:
+                    self.log(f"  ⚠ Попытка {attempt+1}: {e}")
+                    time.sleep(2)
+
+            if not dropped:
+                raise RuntimeError(
+                    f"Не удалось удалить базу '{self.sql_database}'.\n"
+                    f"Пересоздайте LocalDB:\n"
+                    f"  sqllocaldb stop MSSQLLocalDB\n"
+                    f"  sqllocaldb delete MSSQLLocalDB\n"
+                    f"  sqllocaldb create MSSQLLocalDB\n"
+                    f"  sqllocaldb start MSSQLLocalDB"
                 )
-                cur.execute(f"DROP DATABASE [{self.sql_database}]")
-                time.sleep(1)
-            except Exception as e:
-                self.log(f"  ⚠ Не удалось удалить базу: {e}")
+            time.sleep(1)
 
         cur.execute(f"CREATE DATABASE [{self.sql_database}]")
         self.log(f"  База '{self.sql_database}' создана")
@@ -375,6 +406,77 @@ class Migrator:
             self.log(f"      {table}: {inserted} строк (пропущено {skipped} дубликатов)")
         else:
             self.log(f"      {table}: {inserted} строк")
+               # -----------------------------------------------------
 
-        sql_conn.close()
-        acc_conn.close()
+    def _create_datebirth_column(self):
+        """Создаёт колонку Date_Rozhd в Patsient, если её нет."""
+        self.log("\n--- Добавление колонки Patsient.Date_Rozhd ---")
+        sql_conn = None
+        try:
+            sql_conn = pyodbc.connect(self.conn_builder(self.sql_database), autocommit=True)
+            sql_cur = sql_conn.cursor()
+            sql_cur.execute("""
+                IF COL_LENGTH('Patsient', 'Date_Rozhd') IS NULL
+                BEGIN
+                    ALTER TABLE Patsient ADD Date_Rozhd DATETIME NULL
+                END
+            """)
+            self.log("      Колонка Date_Rozhd готова")
+        except Exception as e:
+            self.log(f"      ⚠ Ошибка при создании колонки: {e}")
+        finally:
+            if sql_conn is not None:
+                sql_conn.close()
+
+    def _create_istochnik_naprav_column(self):
+        """Создаёт колонку Istochnik_naprav в Protocol, если её нет."""
+        self.log("\n--- Добавление колонки Protocol.Istochnik_naprav ---")
+        sql_conn = None
+        try:
+            sql_conn = pyodbc.connect(self.conn_builder(self.sql_database), autocommit=True)
+            sql_cur = sql_conn.cursor()
+            sql_cur.execute("""
+                IF COL_LENGTH('Protocol', 'Istochnik_naprav') IS NULL
+                BEGIN
+                    ALTER TABLE Protocol ADD Istochnik_naprav NVARCHAR(255) NULL
+                END
+            """)
+            self.log("      Колонка Istochnik_naprav готова")
+        except Exception as e:
+            self.log(f"      ⚠ Ошибка при создании колонки: {e}")
+        finally:
+            if sql_conn is not None:
+                sql_conn.close()
+                
+    def _fill_datebirth(self):
+        """Заполняет Patsient.Date_Rozhd = Protocol.ProtocolDate - Protocol.Vozrast."""
+        self.log("\n--- Заполнение Patsient.Date_Rozhd ---")
+        sql_conn = None
+        try:
+            sql_conn = pyodbc.connect(self.conn_builder(self.sql_database), autocommit=True)
+            sql_cur = sql_conn.cursor()
+
+            sql_cur.execute("""
+                UPDATE Patsient
+                SET Date_Rozhd = (
+                    SELECT TOP 1
+                        CASE
+                            WHEN p.Vozrast BETWEEN 0 AND 120
+                                 AND p.ProtocolDate IS NOT NULL
+                            THEN DATEADD(year, -p.Vozrast, p.ProtocolDate)
+                            ELSE NULL
+                        END
+                    FROM Protocol p
+                    WHERE p.PatsientID = Patsient.PatsientID
+                      AND p.ProtocolDate IS NOT NULL
+                    ORDER BY p.ProtocolDate ASC
+                )
+                WHERE Date_Rozhd IS NULL
+            """)
+            updated = sql_cur.rowcount
+            self.log(f"      Обновлено: {updated} пациентов")
+        except Exception as e:
+            self.log(f"      ⚠ Ошибка при заполнении Date_Rozhd: {e}")
+        finally:
+            if sql_conn is not None:
+                sql_conn.close()
