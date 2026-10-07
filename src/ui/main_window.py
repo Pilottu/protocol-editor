@@ -879,12 +879,15 @@ class MainWindow(QMainWindow):
 
     def _current_patsient_data(self) -> dict:
         grp_id = self.gruppa_combo.currentData()
+        d = self.datebirth_edit.date()
+        date_birth = datetime.datetime(d.year(), d.month(), d.day())
         return {
             "FIO": self.fio_edit.text().strip(),
             "Pol": self.pol_combo.currentText(),
             "Karta": self.karta_edit.text().strip() or "нет",
             "PatsientGroupID": grp_id if grp_id else 1,
             "OrganizatsiaID": 1,
+            "Date_Rozhd": date_birth,
         }
 
     def _current_protocol_data(self, patsient_id: int) -> dict:
@@ -908,7 +911,8 @@ class MainWindow(QMainWindow):
             "Adres": self.adres_edit.text().strip(),
             "Istor": self.istor_edit.text().strip(),
             "ApparatID": app_id,
-            "Otdelenie": self.otdelenie_edit.text().strip(),
+            "Otdelenie": "",
+            "Istochnik_naprav": self.napravlenie_edit.text().strip(),
             "Anamnez": self.anamnez_edit.text().strip(),
             "Biopsia": self._checkbox_to_str(self.chk_biopsia),
             "IssledovanieID": iss_id,

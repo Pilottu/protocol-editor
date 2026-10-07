@@ -399,7 +399,7 @@ def restore_backup(cfg: dict, backup_path: str) -> tuple[bool, str]:
 def update_patsient(patsient_id: int, data: dict) -> bool:
     sql = """
         UPDATE Patsient
-        SET FIO = ?, Pol = ?, Karta = ?, PatsientGroupID = ?
+        SET FIO = ?, Pol = ?, Karta = ?, PatsientGroupID = ?, Date_Rozhd = ?
         WHERE PatsientID = ?
     """
     with get_connection() as conn:
@@ -409,6 +409,7 @@ def update_patsient(patsient_id: int, data: dict) -> bool:
             data.get("Pol", ""),
             data.get("Karta", ""),
             data.get("PatsientGroupID"),
+            data.get("Date_Rozhd"),
             patsient_id,
         ])
         conn.commit()
@@ -424,8 +425,8 @@ def insert_patsient(data: dict) -> int:
         cur.execute("SET IDENTITY_INSERT Patsient ON")
         cur.execute(
             """
-            INSERT INTO Patsient (PatsientID, FIO, Pol, Karta, PatsientGroupID, OrganizatsiaID)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO Patsient (PatsientID, FIO, Pol, Karta, PatsientGroupID, OrganizatsiaID, Date_Rozhd)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 new_id,
@@ -434,6 +435,7 @@ def insert_patsient(data: dict) -> int:
                 data.get("Karta", ""),
                 data.get("PatsientGroupID", 1),
                 data.get("OrganizatsiaID", 1),
+                data.get("Date_Rozhd"),
             ]
         )
         cur.execute("SET IDENTITY_INSERT Patsient OFF")
@@ -458,7 +460,8 @@ def update_protocol(protocol_id: int, data: dict) -> bool:
             OtdelenieID = ?, Adres = ?, Istor = ?, ApparatID = ?,
             Otdelenie = ?, Anamnez = ?, Biopsia = ?, IssledovanieID = ?,
             [Year] = ?, Tsitologia = ?, Gistologia = ?, Lecheb = ?,
-            Sanats = ?, Intybastia = ?, PHMetr = ?, Smiv = ?, State = ?
+            Sanats = ?, Intybastia = ?, PHMetr = ?, Smiv = ?, State = ?,
+            Istochnik_naprav = ?
         WHERE ProtocolID = ?
     """
     with get_connection() as conn:
@@ -489,6 +492,7 @@ def update_protocol(protocol_id: int, data: dict) -> bool:
             data.get("PHMetr", "нет"),
             data.get("Smiv", "нет"),
             data.get("State", 1),
+            data.get("Istochnik_naprav", ""),
             protocol_id,
         ])
         conn.commit()
@@ -508,8 +512,9 @@ def insert_protocol(data: dict) -> int:
                 ProtocolID, PatsientID, Vozrast, OrganizatsiaID, Nomer, ProtocolDate,
                 Anestezia, ProtocolText, Diagnos, OtdelenieID, Adres, Istor,
                 ApparatID, Otdelenie, Anamnez, Biopsia, IssledovanieID, [Year],
-                Tsitologia, Gistologia, Lecheb, Sanats, Intybastia, PHMetr, Smiv, State
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                Tsitologia, Gistologia, Lecheb, Sanats, Intybastia, PHMetr, Smiv, State,
+                Istochnik_naprav
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 new_id,
@@ -538,6 +543,7 @@ def insert_protocol(data: dict) -> int:
                 data.get("PHMetr", "нет"),
                 data.get("Smiv", "нет"),
                 data.get("State", 1),
+                data.get("Istochnik_naprav", ""),
             ]
         )
         cur.execute("SET IDENTITY_INSERT Protocol OFF")
