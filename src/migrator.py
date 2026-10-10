@@ -14,6 +14,10 @@ import shutil
 import subprocess
 import getpass
 import pyodbc
+import ctypes
+import subprocess
+import time
+import os
 from datetime import datetime
 from typing import Callable, Optional
 
@@ -36,6 +40,22 @@ IDENTITY_FIELDS = {
 }
 
 
+def run_as_admin(exe_path: str, params: str) -> bool:
+    """Запускает exe с правами администратора (UAC-запрос)."""
+    try:
+        result = ctypes.windll.shell32.ShellExecuteW(
+            None,
+            "runas",
+            exe_path,
+            params,
+            None,
+            0  # SW_HIDE
+        )
+        return int(result) > 32
+    except Exception as e:
+        print(f"[ERROR] run_as_admin: {e}")
+        return False
+    
 def map_type(access_type: str, size: int, is_identity: bool = False) -> str:
     t = access_type.upper()
     if is_identity:
@@ -72,6 +92,59 @@ def quote(name: str) -> str:
 
 
 class Migrator:
+    ACCESS_ENGINE_MSI = "AccessDatabaseEngine_X64.msi"
+
+    def _is_access_driver_installed(self) -> bool:
+        """Проверяет наличие 64-битного ACE-драйвера."""
+        try:
+            conn = pyodbc.connect(
+                r"Driver={Microsoft Access Driver (*.mdb, *.accdb)};"
+                r"DBQ=C:\temp\test.mdb;"
+            )
+            conn.close()
+            return True
+        except pyodbc.Error:
+            return False
+
+    def _ensure_access_driver(self) -> str:
+        """Проверяет Access-драйвер. Ставит через UAC, если нет.
+        Возвращает: 'already' | 'installed' | 'declined' | 'failed'."""
+        if self._is_access_driver_installed():
+            self.log("  Access-драйвер уже установлен")
+            return "already"
+
+        msi_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "..", "deps", self.ACCESS_ENGINE_MSI
+        )
+        if not os.path.exists(msi_path):
+            self.log(f"  ⚠ Файл не найден: {msi_path}")
+            return "failed"
+
+        self.log("  Устанавливаю Access-драйвер (UAC)...")
+        ok = run_as_admin("msiexec.exe", f'/i "{msi_path}" /quiet /norestart')
+        if not ok:
+            self.log("  ⚠ UAC отклонён")
+            return "declined"
+
+        # Ждём завершения установки
+        time.sleep(10)
+
+        if self._is_access_driver_installed():
+            self.log("  ✅ Access-драйвер установлен")
+            return "installed"
+        else:
+            self.log("  ⚠ Драйвер не появился после установки")
+            return "failed"
+
+    def _uninstall_access_driver(self):
+        """Удаляет Access-драйвер через UAC."""
+        self.log("  Деинсталлирую Access-драйвер (UAC)...")
+        ok = run_as_admin("msiexec.exe", '/x {90160000-00D1-0000-1000-0000000FF1CE} /quiet /norestart')
+        if ok:
+            self.log("  ✅ Access-драйвер удалён")
+        else:
+            self.log("  ⚠ Не удалось удалить Access-драйвер")
     def __init__(
         self,
         source_dir: str,
@@ -93,6 +166,24 @@ class Migrator:
     # -----------------------------------------------------
 
     def run(self):
+     
+    # 1. Проверяем/ставим Access-драйвер
+    driver_status = self._ensure_access_driver()
+    if driver_status in ("declined", "failed"):
+        raise RuntimeError(
+            "Для миграции нужен Microsoft Access Database Engine.\n"
+            "Установка не выполнена. Обратитесь к администратору."
+        )
+
+    try:
+        # ... вся миграция ...
+        self._create_database()
+        # ...
+    finally:
+        # 4. Деинсталляция — только если ставили сами
+        if driver_status == "installed":
+            self._uninstall_access_driver()
+            
         self.log("=== Начало миграции ===")
         self.progress(0)
 
