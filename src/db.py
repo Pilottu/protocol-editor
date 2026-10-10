@@ -736,6 +736,9 @@ DEFAULT_SETTINGS = {
     "report_period": "month",        # month | year
     "report_year": "2025",
     "report_month": "10",
+    "organizatsia_name": "",
+    "otdelenie_name": "",
+    "otdelenie_head": "",
 }
 
 

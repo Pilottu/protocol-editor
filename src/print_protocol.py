@@ -42,7 +42,10 @@ def _format_fio(fio: str) -> str:
 
 
 def load_protocol_data(protocol_id: int) -> dict:
-    """Читает все данные протокола из базы."""
+    """Читает все данные протокола из базы. Организация/отделение — из Settings."""
+    from db import get_settings_with_defaults
+    settings = get_settings_with_defaults()
+
     with get_connection() as conn:
         cur = conn.cursor()
 
@@ -55,16 +58,12 @@ def load_protocol_data(protocol_id: int) -> dict:
                 p.Otdelenie AS OtdeleniePodr,
                 pat.FIO AS PatsientFIO, pat.Pol AS PatsientPol, pat.Karta AS PatsientKarta,
                 it.Issledovanie AS IssledovanieName,
-                o.OtdelenieName AS OtdelenieName,
                 a.ApparatName AS ApparatName,
-                org.OrganName AS OrganizatsiaName,
                 p.Anestezia
             FROM Protocol p
                 LEFT JOIN Patsient pat ON p.PatsientID = pat.PatsientID
                 LEFT JOIN IssledovanieType it ON p.IssledovanieID = it.IssledovanieID
-                LEFT JOIN Otdelenie o ON p.OtdelenieID = o.OtdelenieID
                 LEFT JOIN Apparat a ON p.ApparatID = a.ApparatID
-                LEFT JOIN Organizatsia org ON p.OrganizatsiaID = org.OrganizatsiaID
             WHERE p.ProtocolID = ?
         """, [protocol_id])
         row = cur.fetchone()
@@ -72,6 +71,11 @@ def load_protocol_data(protocol_id: int) -> dict:
             return {}
         cols = [d[0] for d in cur.description]
         data = dict(zip(cols, row))
+
+        # --- Организация/Отделение/Заведующий — только из Settings ---
+        data["OrganizatsiaName"] = settings.get("organizatsia_name", "")
+        data["OtdelenieName"] = settings.get("otdelenie_name", "")
+        data["Zaveduyushiy"] = settings.get("otdelenie_head", "")
 
         # Заключения
         cur.execute("""
@@ -213,6 +217,7 @@ def build_html(data: dict) -> str:
 
 <div class="signature">
     <div class="vrach">Врач {vrachi_html}</div>
+    <div class="zaved">Зав. отделением {_value(data.get('Zaveduyushiy'))}</div>
 </div>
 
 </body>

@@ -48,30 +48,6 @@ class FilterTab(QWidget):
         layout.addStretch()
 
 
-class OtdelenieTab(QWidget):
-    def __init__(self):
-        super().__init__()
-        layout = QVBoxLayout(self)
-        form = QFormLayout()
-        self.otdelenie_edit = QLineEdit()
-        self.zaved_edit = QLineEdit()
-        form.addRow("Отделение", self.otdelenie_edit)
-        form.addRow("Заведующий", self.zaved_edit)
-        layout.addLayout(form)
-        # Кнопка «Сохранить изменения» убрана — сохранение через «Сохранить настройки» внизу диалога
-        layout.addStretch()
-        self._load()
-
-    def _load(self):
-        """Загружает данные отделения из таблицы Settings."""
-        try:
-            s = get_settings_with_defaults()
-            self.otdelenie_edit.setText(s.get("otdelenie_name", ""))
-            self.zaved_edit.setText(s.get("otdelenie_head", ""))
-        except Exception as e:
-            QMessageBox.warning(self, "Ошибка", f"Не удалось загрузить данные отделения:\n{e}")
-
-
 class DocumentTab(QWidget):
     def __init__(self):
         super().__init__()
@@ -250,22 +226,21 @@ class ReferencesTab(QWidget):
         super().__init__()
         layout = QVBoxLayout(self)
 
-        org_row = QHBoxLayout()
-        org_row.addWidget(QLabel("Организация"))
+        # --- Данные отделения (переехали с удалённой вкладки) ---
+        otd_form = QFormLayout()
+        self.otdelenie_edit = QLineEdit()
+        self.zaved_edit = QLineEdit()
+        otd_form.addRow("Отделение", self.otdelenie_edit)
+        otd_form.addRow("Заведующий", self.zaved_edit)
+        layout.addLayout(otd_form)
+
+        # --- Организация ---
+        org_form = QFormLayout()
         self.org_edit = QLineEdit()
-        org_row.addWidget(self.org_edit, stretch=1)
-        btn_org_change = QPushButton("Изменить")
-        org_row.addWidget(btn_org_change)
-        layout.addLayout(org_row)
+        org_form.addRow("Организация", self.org_edit)
+        layout.addLayout(org_form)
 
-        otd_row = QHBoxLayout()
-        otd_row.addWidget(QLabel("Отделение"))
-        self.otd_edit = QLineEdit()
-        otd_row.addWidget(self.otd_edit, stretch=1)
-        btn_otd_change = QPushButton("Изменить")
-        otd_row.addWidget(btn_otd_change)
-        layout.addLayout(otd_row)
-
+        # --- Группы пациентов ---
         grp_group = QGroupBox("Группы пациентов")
         grp_layout = QHBoxLayout(grp_group)
         grp_left = QVBoxLayout()
@@ -283,6 +258,7 @@ class ReferencesTab(QWidget):
         grp_layout.addLayout(grp_btn_layout)
         layout.addWidget(grp_group)
 
+        # --- Исследования ---
         iss_group = QGroupBox("Исследования")
         iss_layout = QHBoxLayout(iss_group)
         self.iss_tree = QTreeWidget()
@@ -344,16 +320,21 @@ class ReferencesTab(QWidget):
 
     def _load(self):
         try:
+            # Отделение и Заведующий — из Settings
+            s = get_settings_with_defaults()
+            self.otdelenie_edit.setText(s.get("otdelenie_name", ""))
+            self.zaved_edit.setText(s.get("otdelenie_head", ""))
+
             with get_connection() as conn:
                 cur = conn.cursor()
-                cur.execute("SELECT TOP 1 OrganName FROM Organizatsia")
-                row = cur.fetchone()
-                if row:
-                    self.org_edit.setText(row[0] or "")
-                cur.execute("SELECT TOP 1 OtdelenieName FROM Otdelenie")
-                row = cur.fetchone()
-                if row:
-                    self.otd_edit.setText(row[0] or "")
+                # Организация — из Settings (если задана), иначе из таблицы
+                org_name = s.get("organizatsia_name", "")
+                if not org_name:
+                    cur.execute("SELECT TOP 1 OrganName FROM Organizatsia")
+                    row = cur.fetchone()
+                    if row:
+                        org_name = row[0] or ""
+                self.org_edit.setText(org_name)
                 cur.execute("SELECT PatsientGroupName FROM PatsientGroup ORDER BY PatsientGroupName")
                 self.grp_list.clear()
                 for row in cur.fetchall():
@@ -389,16 +370,15 @@ class SettingsDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Настройки")
-        self.resize(950, 620)   # ← уменьшено
+        self.resize(950, 620)
 
         layout = QVBoxLayout(self)
 
         self.tabs = QTabWidget()
-        self.tabs.addTab(OtdelenieTab(), "Данные отделения")
         self.tabs.addTab(DocumentTab(), "Документ")
         self.tabs.addTab(ProtocolEditorTab(), "Редактор протокола")
         self.tabs.addTab(ReportSettingsTab(), "Настройки отчета")
-        self.tabs.addTab(ReferencesTab(), "Справочники")
+        self.tabs.addTab(ReferencesTab(), "Данные отделения")
         self.tabs.addTab(DatabaseTab(), "База данных")
         layout.addWidget(self.tabs)
 
@@ -416,15 +396,8 @@ class SettingsDialog(QDialog):
         """Собирает настройки со всех вкладок и сохраняет в БД."""
         data = {}
 
-        # Вкладка «Данные отделения» (индекс 0)
-        tab = self.tabs.widget(0)   # OtdelenieTab
-        if hasattr(tab, "otdelenie_edit"):
-            data["otdelenie_name"] = tab.otdelenie_edit.text()
-        if hasattr(tab, "zaved_edit"):
-            data["otdelenie_head"] = tab.zaved_edit.text()
-
-        # Вкладка «Документ» (индекс 1)
-        tab = self.tabs.widget(1)   # DocumentTab
+        # Вкладка «Документ» (индекс 0)
+        tab = self.tabs.widget(0)
         if hasattr(tab, "zagolovok_edit"):
             data["document_title"] = tab.zagolovok_edit.text()
         if hasattr(tab, "rb_proto_html") and hasattr(tab, "rb_proto_rtf"):
@@ -440,13 +413,13 @@ class SettingsDialog(QDialog):
             data["page_margin_top"] = tab.field_top.text()
             data["page_margin_bottom"] = tab.field_bottom.text()
 
-        # Вкладка «Редактор протокола» (индекс 2)
-        tab = self.tabs.widget(2)
+        # Вкладка «Редактор протокола» (индекс 1)
+        tab = self.tabs.widget(1)
         if hasattr(tab, "rb_list") and hasattr(tab, "rb_two_pages"):
             data["protocol_style"] = "list" if tab.rb_list.isChecked() else "two_pages"
 
-        # Вкладка «Настройки отчёта» (индекс 3)
-        tab = self.tabs.widget(3)
+        # Вкладка «Настройки отчёта» (индекс 2)
+        tab = self.tabs.widget(2)
         if hasattr(tab, "rb_nagruzka") and hasattr(tab, "rb_nozologia"):
             data["report_form"] = "gistologia" if tab.rb_nozologia.isChecked() else "nagruzka"
         if hasattr(tab, "rb_month") and hasattr(tab, "rb_year"):
@@ -456,6 +429,15 @@ class SettingsDialog(QDialog):
         if hasattr(tab, "month_combo"):
             data["report_month"] = str(tab.month_combo.currentIndex() + 1)
 
+        # Вкладка «Данные отделения» (индекс 3)
+        tab = self.tabs.widget(3)
+        if hasattr(tab, "otdelenie_edit"):
+            data["otdelenie_name"] = tab.otdelenie_edit.text()
+        if hasattr(tab, "zaved_edit"):
+            data["otdelenie_head"] = tab.zaved_edit.text()
+        if hasattr(tab, "org_edit"):
+            data["organizatsia_name"] = tab.org_edit.text()
+
         # Сохраняем в БД
         ok = save_settings(data)
         if ok:
@@ -463,7 +445,8 @@ class SettingsDialog(QDialog):
             self.accept()
         else:
             QMessageBox.critical(self, "Ошибка", "Не удалось сохранить настройки.")
-            
+
+
 if __name__ == "__main__":
     from PyQt6.QtWidgets import QApplication
     app = QApplication(sys.argv)
