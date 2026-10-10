@@ -6,18 +6,27 @@
 import os
 import configparser
 
-CONFIG_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "config.ini")
+# Конфиг хранится в %LOCALAPPDATA%\ProtocolEditor\config.ini
+# — так программа работает и из Program Files, и из dev-режима
+CONFIG_DIR = os.path.join(
+    os.environ.get("LOCALAPPDATA", os.path.expanduser("~")),
+    "ProtocolEditor"
+)
+os.makedirs(CONFIG_DIR, exist_ok=True)
+CONFIG_PATH = os.path.join(CONFIG_DIR, "config.ini")
 
 
 DEFAULTS = {
-    "server": r".\TEW_SQLEXPRESS",
+    "server": r"(localdb)\MSSQLLocalDB",
     "database": "ProtocolDB",
     "auth": "windows",          # windows | sql
     "user": "",
     "password": "",
     "encrypt": "no",
     "trust_cert": "yes",
-    "backup_dir": r"E:\Prog\Piton\data",
+    "backup_dir": os.path.join(
+        os.path.expanduser("~"), "Documents", "ProtocolEditor", "backups"
+    ),
 }
 
 

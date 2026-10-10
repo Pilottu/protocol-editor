@@ -10,7 +10,9 @@ import os
 import sys
 from datetime import datetime
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
 from db import get_connection
 
 
@@ -261,10 +263,12 @@ def build_gistologia_report(year: int, month: int = None, top_n: int = 20) -> st
 # =========================================================
 
 def save_and_open(html: str, filename: str):
-    """Сохраняет HTML в data/reports/ и открывает в браузере."""
+    """Сохраняет HTML в %LOCALAPPDATA%\\ProtocolEditor\\reports\\ и открывает в браузере."""
     import webbrowser
-    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    reports_dir = os.path.join(here, "data", "reports")
+    reports_dir = os.path.join(
+        os.environ.get("LOCALAPPDATA", os.path.expanduser("~")),
+        "ProtocolEditor", "reports"
+    )
     os.makedirs(reports_dir, exist_ok=True)
     path = os.path.join(reports_dir, filename)
     with open(path, "w", encoding="utf-8") as f:

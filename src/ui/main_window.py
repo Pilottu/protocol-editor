@@ -13,7 +13,10 @@ from PyQt6.QtGui import QStandardItemModel, QStandardItem, QAction
 from PyQt6.QtCore import Qt, QDate, QTime
 
 
-sys.path.insert(0, r"E:\Prog\Piton\src")
+import os
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
 from db import (
     get_references,
     get_tree_data,
@@ -1410,10 +1413,14 @@ def run():
         tb = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
         # Пишем в файл — чтобы не потерять traceback
         try:
-            log_path = os.path.join(
-                os.path.dirname(os.path.abspath(__file__)),
-                "..", "..", "data", "crash.log"
+            # В собранном приложении пишем в %LOCALAPPDATA%\ProtocolEditor\
+            # Рядом с exe писать нельзя — Program Files только для чтения
+            log_dir = os.path.join(
+                os.environ.get("LOCALAPPDATA", os.path.expanduser("~")),
+                "ProtocolEditor"
             )
+            os.makedirs(log_dir, exist_ok=True)
+            log_path = os.path.join(log_dir, "crash.log")
             with open(log_path, "a", encoding="utf-8") as f:
                 f.write("\n" + "=" * 60 + "\n")
                 f.write(_dt.datetime.now().isoformat() + "\n")

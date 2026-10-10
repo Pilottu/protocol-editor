@@ -8,7 +8,10 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt
 
-sys.path.insert(0, r"E:\Prog\Piton\src")
+import os
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
 from db import (
     get_references, get_connection,
     get_settings_with_defaults, save_settings,

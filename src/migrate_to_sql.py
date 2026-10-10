@@ -22,7 +22,8 @@ from datetime import datetime
 
 
 # --- Настройки SQL Server ---
-SQL_SERVER = r".\TEW_SQLEXPRESS"
+import os
+SQL_SERVER = os.environ.get("PROTOCOL_SQL_SERVER", r"(localdb)\MSSQLLocalDB")
 
 # Строка подключения к master (для создания базы)
 SQL_MASTER_CONN = (

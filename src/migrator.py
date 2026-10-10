@@ -12,6 +12,7 @@
 """
 
 import os
+import sys
 import time
 import shutil
 import subprocess
@@ -163,10 +164,17 @@ class Migrator:
             self.log("  Access-драйвер уже установлен")
             return "already"
 
-        exe_path = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)),
-            "..", "deps", self.ACCESS_ENGINE_EXE
-        )
+        # В собранном приложении deps лежат рядом с exe или в _internal
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        exe_path = os.path.join(base_dir, "..", "deps", self.ACCESS_ENGINE_EXE)
+        if not os.path.exists(exe_path):
+            # Nuitka onefile распаковывает рядом с exe
+            exe_path = os.path.join(base_dir, "deps", self.ACCESS_ENGINE_EXE)
+        if not os.path.exists(exe_path):
+            # Fallback — искать в корне приложения
+            exe_path = os.path.join(
+                os.path.dirname(sys.executable), "deps", self.ACCESS_ENGINE_EXE
+            )
         if not os.path.exists(exe_path):
             self.log(f"  ⚠ Файл не найден: {exe_path}")
             return "failed"

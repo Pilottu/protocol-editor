@@ -2,6 +2,7 @@ import os
 import sys
 import subprocess
 import datetime
+import tempfile
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QGroupBox,
     QLabel, QLineEdit, QPushButton, QCheckBox, QRadioButton,
@@ -9,7 +10,10 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
 
-sys.path.insert(0, r"E:\Prog\Piton\src")
+import os
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
 from db import test_connection, make_backup, reload_config, restore_backup
 from config import load_config, save_config, build_connection_string
 from migrator import Migrator
@@ -18,7 +22,10 @@ import pyodbc
 
 
 def build_restart_command() -> list[str]:
-    """Возвращает команду, используемую штатным перезапуском приложения."""
+    """Возвращает команду для перезапуска приложения.
+    В frozen-режиме это сам exe, в dev — python + скрипт."""
+    if getattr(sys, "frozen", False):
+        return [sys.executable, *sys.argv[1:]]
     return [
         sys.executable,
         os.path.abspath(sys.argv[0]),
@@ -229,10 +236,16 @@ class ServersListThread(QThread):
 # =========================================================
 
 def get_app_dir() -> str:
-    if getattr(sys, "frozen", False):
-        return os.path.dirname(sys.executable)
-    here = os.path.dirname(os.path.abspath(__file__))
-    return os.path.dirname(os.path.dirname(here))
+    """
+    Возвращает папку, куда можно писать данные (не Program Files!).
+    Для записи .mdf/.ldf используется %LOCALAPPDATA%\ProtocolEditor\data.
+    """
+    data_root = os.path.join(
+        os.environ.get("LOCALAPPDATA", os.path.expanduser("~")),
+        "ProtocolEditor"
+    )
+    os.makedirs(data_root, exist_ok=True)
+    return data_root
 
 
 def is_localdb_installed() -> bool:
@@ -511,7 +524,7 @@ class DatabaseTab(QWidget):
 
         dir_row = QHBoxLayout()
         dir_row.addWidget(QLabel("Папка с .mdb:"))
-        self.data_dir_edit = QLineEdit(cfg.get("backup_dir", r"E:\Prog\Piton\data"))
+        self.data_dir_edit = QLineEdit(cfg.get("backup_dir", default_backup))
         dir_row.addWidget(self.data_dir_edit, stretch=1)
         btn_dir = QPushButton("...")
         btn_dir.setFixedWidth(28)
@@ -575,7 +588,11 @@ class DatabaseTab(QWidget):
 
         backup_dir_row = QHBoxLayout()
         backup_dir_row.addWidget(QLabel("Папка для бэкапов:"))
-        self.backup_dir_edit = QLineEdit(cfg.get("backup_dir", r"E:\Prog\Piton\data"))
+        # По умолчанию бэкапы пишем в %USERPROFILE%\Documents\ProtocolEditor\backups
+        default_backup = os.path.join(
+            os.path.expanduser("~"), "Documents", "ProtocolEditor", "backups"
+        )
+        self.backup_dir_edit = QLineEdit(cfg.get("backup_dir", default_backup))
         backup_dir_row.addWidget(self.backup_dir_edit, stretch=1)
         btn_browse = QPushButton("...")
         btn_browse.setFixedWidth(28)
@@ -644,7 +661,7 @@ class DatabaseTab(QWidget):
             self.btn_install.setVisible(False)
             self.btn_reinstall.setVisible(True)
         else:
-            app_dir = get_app_dir()
+            app_dir = os.path.join(tempfile.gettempdir(), "ProtocolEditorSetup")
             msi_path = os.path.join(app_dir, "SqlLocalDB.msi")
             if os.path.exists(msi_path):
                 size_mb = os.path.getsize(msi_path) / (1024 * 1024)
@@ -672,7 +689,9 @@ class DatabaseTab(QWidget):
         if not url:
             QMessageBox.warning(self, "Ошибка", "Укажите URL")
             return
-        app_dir = get_app_dir()
+        # MSI качаем в %TEMP%\ProtocolEditorSetup, а не в Program Files
+        app_dir = os.path.join(tempfile.gettempdir(), "ProtocolEditorSetup")
+        os.makedirs(app_dir, exist_ok=True)
         dest = os.path.join(app_dir, "SqlLocalDB.msi")
         if os.path.exists(dest):
             ans = QMessageBox.question(
@@ -705,7 +724,7 @@ class DatabaseTab(QWidget):
         self.btn_download.setEnabled(True)
 
     def on_install(self):
-        app_dir = get_app_dir()
+        app_dir = os.path.join(tempfile.gettempdir(), "ProtocolEditorSetup")
         msi_path = os.path.join(app_dir, "SqlLocalDB.msi")
         if not os.path.exists(msi_path):
             QMessageBox.warning(self, "Ошибка", f"Файл не найден:\n{msi_path}")
@@ -822,7 +841,7 @@ class DatabaseTab(QWidget):
             QMessageBox.warning(self, "Ошибка", f"Папка не существует:\n{data_dir}")
             return
 
-        target_dir = os.path.normpath(get_app_dir() + r"\data")
+        target_dir = os.path.join(get_app_dir(), "data")
         os.makedirs(target_dir, exist_ok=True)
 
         server = self.server_combo.currentText().strip()

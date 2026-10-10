@@ -5,8 +5,16 @@ from typing import Optional
 from config import load_config, build_connection_string
 
 
-_CFG = load_config()
-CONN_STR = build_connection_string(_CFG)
+# Ленивая инициализация, чтобы падение конфига не убивало импорт
+_CFG = None
+CONN_STR = None
+
+def _ensure_cfg():
+    global _CFG, CONN_STR
+    if _CFG is None:
+        _CFG = load_config()
+        CONN_STR = build_connection_string(_CFG)
+    return _CFG, CONN_STR
 
 
 def reload_config():
@@ -17,6 +25,7 @@ def reload_config():
 
 @contextmanager
 def get_connection():
+    _ensure_cfg()
     conn = pyodbc.connect(CONN_STR, autocommit=False)
     try:
         yield conn
