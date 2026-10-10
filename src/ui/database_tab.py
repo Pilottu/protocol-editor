@@ -762,15 +762,20 @@ class DatabaseTab(QWidget):
         self.migr_log.append(msg)
 
     def _on_migr_finished(self, ok: bool, msg: str):
-        self.btn_migrate.setEnabled(True)
-        if ok:
-            QMessageBox.information(self, "Миграция", f"✅ {msg}")
-            self.conn_status.setText(f"✅ {msg}")
-            self.conn_status.setStyleSheet("color: green;")
-        else:
-            QMessageBox.critical(self, "Ошибка миграции", msg)
-            self.conn_status.setText(f"❌ {msg}")
-            self.conn_status.setStyleSheet("color: red;")
+        try:
+            self.btn_migrate.setEnabled(True)
+            if ok:
+                QMessageBox.information(self, "Миграция", f"✅ {msg}")
+                self.conn_status.setText(f"✅ {msg}")
+                self.conn_status.setStyleSheet("color: green;")
+            else:
+                QMessageBox.critical(self, "Ошибка миграции", msg)
+                self.conn_status.setText(f"❌ {msg}")
+                self.conn_status.setStyleSheet("color: red;")
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            QMessageBox.critical(self, "Ошибка после миграции", f"{e}")
 
     # ============================================
     #  Attach / Detach

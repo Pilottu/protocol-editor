@@ -1,5 +1,6 @@
 import sys
 import datetime
+import os
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QSplitter, QTreeView, QTabWidget, QFormLayout, QLineEdit,
@@ -1358,7 +1359,20 @@ def run():
     # Глобальный перехват исключений
     def excepthook(exc_type, exc_value, exc_tb):
         import traceback
+        import datetime as _dt
         tb = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
+        # Пишем в файл — чтобы не потерять traceback
+        try:
+            log_path = os.path.join(
+                os.path.dirname(os.path.abspath(__file__)),
+                "..", "..", "data", "crash.log"
+            )
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write("\n" + "=" * 60 + "\n")
+                f.write(_dt.datetime.now().isoformat() + "\n")
+                f.write(tb + "\n")
+        except Exception:
+            pass
         print("[FATAL]", tb)
         try:
             QMessageBox.critical(None, "Критическая ошибка", tb)

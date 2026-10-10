@@ -2,10 +2,12 @@
 Миграция Access (.mdb) → SQL Server (LocalDB).
 
 Порядок:
-  1. CREATE DATABASE без указания пути.
-  2. sp_detach_db → копирование .mdf/.ldf в target_dir → FOR ATTACH.
-  3. Мигрируем таблицы, сохраняя оригинальные ID (SET IDENTITY_INSERT ON).
-  4. DBCC CHECKIDENT — пересчёт счётчика.
+  1. Проверка/установка Access Database Engine (через UAC).
+  2. CREATE DATABASE без указания пути.
+  3. sp_detach_db → копирование .mdf/.ldf в target_dir → FOR ATTACH.
+  4. Мигрируем таблицы, сохраняя оригинальные ID.
+  5. DBCC CHECKIDENT — пересчёт счётчика.
+  6. Деинсталляция Access Database Engine (если ставили сами).
 """
 
 import os
@@ -13,11 +15,9 @@ import time
 import shutil
 import subprocess
 import getpass
-import pyodbc
 import ctypes
-import subprocess
-import time
-import os
+import winreg
+import pyodbc
 from datetime import datetime
 from typing import Callable, Optional
 
@@ -55,7 +55,8 @@ def run_as_admin(exe_path: str, params: str) -> bool:
     except Exception as e:
         print(f"[ERROR] run_as_admin: {e}")
         return False
-    
+
+
 def map_type(access_type: str, size: int, is_identity: bool = False) -> str:
     t = access_type.upper()
     if is_identity:
@@ -92,59 +93,10 @@ def quote(name: str) -> str:
 
 
 class Migrator:
-    ACCESS_ENGINE_MSI = "AccessDatabaseEngine_X64.msi"
+    ACCESS_ENGINE_EXE = "accessdatabaseengine_X64.exe"
+    # Fallback — English-версия Access Database Engine 2016
+    ACCESS_ENGINE_PRODUCT_CODE = "{90160000-00D1-0409-1000-0000000FF1CE}"
 
-    def _is_access_driver_installed(self) -> bool:
-        """Проверяет наличие 64-битного ACE-драйвера."""
-        try:
-            conn = pyodbc.connect(
-                r"Driver={Microsoft Access Driver (*.mdb, *.accdb)};"
-                r"DBQ=C:\temp\test.mdb;"
-            )
-            conn.close()
-            return True
-        except pyodbc.Error:
-            return False
-
-    def _ensure_access_driver(self) -> str:
-        """Проверяет Access-драйвер. Ставит через UAC, если нет.
-        Возвращает: 'already' | 'installed' | 'declined' | 'failed'."""
-        if self._is_access_driver_installed():
-            self.log("  Access-драйвер уже установлен")
-            return "already"
-
-        msi_path = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)),
-            "..", "deps", self.ACCESS_ENGINE_MSI
-        )
-        if not os.path.exists(msi_path):
-            self.log(f"  ⚠ Файл не найден: {msi_path}")
-            return "failed"
-
-        self.log("  Устанавливаю Access-драйвер (UAC)...")
-        ok = run_as_admin("msiexec.exe", f'/i "{msi_path}" /quiet /norestart')
-        if not ok:
-            self.log("  ⚠ UAC отклонён")
-            return "declined"
-
-        # Ждём завершения установки
-        time.sleep(10)
-
-        if self._is_access_driver_installed():
-            self.log("  ✅ Access-драйвер установлен")
-            return "installed"
-        else:
-            self.log("  ⚠ Драйвер не появился после установки")
-            return "failed"
-
-    def _uninstall_access_driver(self):
-        """Удаляет Access-драйвер через UAC."""
-        self.log("  Деинсталлирую Access-драйвер (UAC)...")
-        ok = run_as_admin("msiexec.exe", '/x {90160000-00D1-0000-1000-0000000FF1CE} /quiet /norestart')
-        if ok:
-            self.log("  ✅ Access-драйвер удалён")
-        else:
-            self.log("  ⚠ Не удалось удалить Access-драйвер")
     def __init__(
         self,
         source_dir: str,
@@ -163,74 +115,172 @@ class Migrator:
         self.log = log or (lambda msg: None)
         self.progress = progress or (lambda p: None)
 
-    # -----------------------------------------------------
+    # =========================================================
+    #  Access Database Engine
+    # =========================================================
+
+    def _is_access_driver_installed(self) -> bool:
+        """Проверяет наличие 64-битного ACE-драйвера через pyodbc.drivers()."""
+        try:
+            for d in pyodbc.drivers():
+                if "Microsoft Access Driver" in d and ".accdb" in d:
+                    return True
+            return False
+        except Exception:
+            return False
+
+    def _ensure_access_driver(self) -> str:
+        """Проверяет Access-драйвер. Ставит через UAC, если нет.
+        Возвращает: 'already' | 'installed' | 'declined' | 'failed'."""
+        if self._is_access_driver_installed():
+            self.log("  Access-драйвер уже установлен")
+            return "already"
+
+        exe_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "..", "deps", self.ACCESS_ENGINE_EXE
+        )
+        if not os.path.exists(exe_path):
+            self.log(f"  ⚠ Файл не найден: {exe_path}")
+            return "failed"
+
+        self.log("  Устанавливаю Access-драйвер (UAC)...")
+        ok = run_as_admin(exe_path, "/quiet")
+        if not ok:
+            self.log("  ⚠ UAC отклонён")
+            return "declined"
+
+        # Ждём завершения установки
+        time.sleep(15)
+
+        if self._is_access_driver_installed():
+            self.log("  ✅ Access-драйвер установлен")
+            return "installed"
+        else:
+            self.log("  ⚠ Драйвер не появился после установки")
+            return "failed"
+
+    def _find_access_engine_product_code(self) -> str:
+        """Ищет ProductCode Access Database Engine в реестре."""
+        roots = [
+            r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
+            r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall",
+        ]
+        keywords = [
+            "Access database engine",
+            "Access Database Engine",
+            "Microsoft Access database engine",
+        ]
+        for root in roots:
+            try:
+                key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, root)
+                count = winreg.QueryInfoKey(key)[0]
+                for i in range(count):
+                    subkey_name = winreg.EnumKey(key, i)
+                    try:
+                        subkey = winreg.OpenKey(key, subkey_name)
+                        name = winreg.QueryValueEx(subkey, "DisplayName")[0]
+                        if "access" in name.lower():
+                            self.log(f"      [DEBUG] Найден: {subkey_name} = '{name}'")
+                        for kw in keywords:
+                            if kw.lower() in name.lower():
+                                self.log(f"      ✅ ProductCode: {subkey_name}")
+                                return subkey_name
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+        return ""
+
+    def _uninstall_access_driver(self):
+        """Удаляет Access-драйвер через UAC."""
+        self.log("  Деинсталлирую Access-драйвер (UAC)...")
+        code = self._find_access_engine_product_code()
+        if not code:
+            code = self.ACCESS_ENGINE_PRODUCT_CODE
+            self.log(f"  Использую ProductCode по умолчанию: {code}")
+        else:
+            self.log(f"  Использую ProductCode из реестра: {code}")
+
+        ok = run_as_admin(
+            "msiexec.exe",
+            f'/x {code} /quiet /norestart'
+        )
+        if ok:
+            self.log("  ✅ Access-драйвер удалён")
+        else:
+            self.log("  ⚠ Не удалось удалить Access-драйвер")
+
+    # =========================================================
+    #  Запуск миграции
+    # =========================================================
 
     def run(self):
-     
-    # 1. Проверяем/ставим Access-драйвер
-    driver_status = self._ensure_access_driver()
-    if driver_status in ("declined", "failed"):
-        raise RuntimeError(
-            "Для миграции нужен Microsoft Access Database Engine.\n"
-            "Установка не выполнена. Обратитесь к администратору."
-        )
+        # 1. Проверяем/ставим Access-драйвер
+        driver_status = self._ensure_access_driver()
+        if driver_status in ("declined", "failed"):
+            raise RuntimeError(
+                "Для миграции нужен Microsoft Access Database Engine.\n"
+                "Установка не выполнена. Обратитесь к администратору."
+            )
 
-    try:
-        # ... вся миграция ...
-        self._create_database()
-        # ...
-    finally:
-        # 4. Деинсталляция — только если ставили сами
-        if driver_status == "installed":
-            self._uninstall_access_driver()
-            
-        self.log("=== Начало миграции ===")
-        self.progress(0)
+        try:
+            self.log("=== Начало миграции ===")
+            self.progress(0)
 
-        if not os.path.isdir(self.source_dir):
-            raise RuntimeError(f"Папка с .mdb не найдена: {self.source_dir}")
+            if not os.path.isdir(self.source_dir):
+                raise RuntimeError(f"Папка с .mdb не найдена: {self.source_dir}")
 
-        mdb_paths = []
-        for name in MDB_FILES:
-            path = os.path.join(self.source_dir, name)
-            if os.path.exists(path):
-                mdb_paths.append(path)
-                self.log(f"Найден: {path}")
-            else:
-                self.log(f"Не найден (пропущен): {path}")
+            mdb_paths = []
+            for name in MDB_FILES:
+                path = os.path.join(self.source_dir, name)
+                if os.path.exists(path):
+                    mdb_paths.append(path)
+                    self.log(f"Найден: {path}")
+                else:
+                    self.log(f"Не найден (пропущен): {path}")
 
-        if not mdb_paths:
-            raise RuntimeError("В папке нет ни одного .mdb-файла")
+            if not mdb_paths:
+                raise RuntimeError("В папке нет ни одного .mdb-файла")
 
-        self._create_and_move_database()
-        self.progress(10)
+            self._create_and_move_database()
+            self.progress(10)
 
-        total_steps = 0
-        for mdb in mdb_paths:
-            total_steps += len(self._list_access_tables(mdb))
+            total_steps = 0
+            for mdb in mdb_paths:
+                total_steps += len(self._list_access_tables(mdb))
 
-        self.log(f"Всего таблиц к миграции: {total_steps}")
-        self.progress(15)
+            self.log(f"Всего таблиц к миграции: {total_steps}")
+            self.progress(15)
 
-        step = 0
-        for mdb in mdb_paths:
-            self.log(f"\n--- Файл: {os.path.basename(mdb)} ---")
-            for table in self._list_access_tables(mdb):
-                step += 1
-                percent = 15 + int(step * 85 / max(total_steps, 1))
-                self.progress(percent)
-                self.log(f"  >>> {table}")
-                self._migrate_table(mdb, table)
+            step = 0
+            for mdb in mdb_paths:
+                self.log(f"\n--- Файл: {os.path.basename(mdb)} ---")
+                for table in self._list_access_tables(mdb):
+                    step += 1
+                    percent = 15 + int(step * 85 / max(total_steps, 1))
+                    self.progress(percent)
+                    self.log(f"  >>> {table}")
+                    self._migrate_table(mdb, table)
 
-        self.progress(100)
-        self.log("=== Миграция завершена ===")
+            self.progress(100)
+            self.log("=== Миграция завершена ===")
 
-        # Финальный шаг: создаём Date_Rozhd в Patsient и заполняем из Protocol
-        self._create_datebirth_column()
-        self._create_istochnik_naprav_column()
-        self._fill_datebirth()
+            # Финальный шаг
+            self._create_datebirth_column()
+            self._create_istochnik_naprav_column()
+            self._fill_datebirth()
+        finally:
+            # Деинсталляция — только если ставили сами
+            if driver_status == "installed":
+                try:
+                    self._uninstall_access_driver()
+                except Exception as e:
+                    self.log(f"  ⚠ Ошибка при деинсталляции: {e}")
 
-    # -----------------------------------------------------
+    # =========================================================
+    #  Создание и перенос базы
+    # =========================================================
 
     def _create_and_move_database(self):
         self.log(f"Создание базы '{self.sql_database}' (в папке SQL Server)...")
@@ -250,7 +300,6 @@ class Migrator:
                     )
                 except Exception:
                     pass
-                # OFFLINE освобождает файлы (даже если их нет)
                 try:
                     cur.execute(
                         f"ALTER DATABASE [{self.sql_database}] "
@@ -363,7 +412,9 @@ class Migrator:
 
         self.log(f"  ✅ База готова, файлы в {self.target_dir}")
 
-    # -----------------------------------------------------
+    # =========================================================
+    #  Access-подключение
+    # =========================================================
 
     def _access_conn(self, mdb_path: str):
         conn_str = (
@@ -384,7 +435,9 @@ class Migrator:
         conn.close()
         return sorted(tables)
 
-    # -----------------------------------------------------
+    # =========================================================
+    #  Миграция таблицы
+    # =========================================================
 
     def _migrate_table(self, mdb_path: str, table: str):
         self.log(f"      [DEBUG] {table}: старт _migrate_table")
@@ -407,7 +460,6 @@ class Migrator:
         sql_conn = pyodbc.connect(self.conn_builder(self.sql_database), autocommit=False)
         sql_cur = sql_conn.cursor()
 
-        # DEBUG: реальная база и уровень транзакции
         sql_cur.execute("SELECT DB_NAME(), @@TRANCOUNT")
         row = sql_cur.fetchone()
         self.log(f"      [DEBUG] {table}: подключено к db={row[0]}, trancount={row[1]}")
@@ -470,14 +522,12 @@ class Migrator:
             if i % 500 == 0:
                 sql_conn.commit()
 
-        # DEBUG: проверка до commit
         sql_cur.execute(f"SELECT COUNT(*) FROM {quote(table)}")
         cnt_before = sql_cur.fetchone()[0]
         self.log(f"      [DEBUG] {table}: в транзакции {cnt_before} строк (до commit)")
 
         sql_conn.commit()
 
-        # DEBUG: проверка после commit
         sql_cur.execute(f"SELECT COUNT(*) FROM {quote(table)}")
         cnt_after = sql_cur.fetchone()[0]
         self.log(f"      [DEBUG] {table}: после commit {cnt_after} строк")
@@ -497,7 +547,10 @@ class Migrator:
             self.log(f"      {table}: {inserted} строк (пропущено {skipped} дубликатов)")
         else:
             self.log(f"      {table}: {inserted} строк")
-               # -----------------------------------------------------
+
+    # =========================================================
+    #  Дополнительные колонки
+    # =========================================================
 
     def _create_datebirth_column(self):
         """Создаёт колонку Date_Rozhd в Patsient, если её нет."""
@@ -538,7 +591,7 @@ class Migrator:
         finally:
             if sql_conn is not None:
                 sql_conn.close()
-                
+
     def _fill_datebirth(self):
         """Заполняет Patsient.Date_Rozhd = Protocol.ProtocolDate - Protocol.Vozrast."""
         self.log("\n--- Заполнение Patsient.Date_Rozhd ---")
