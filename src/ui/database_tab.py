@@ -17,6 +17,15 @@ from migrator import Migrator
 import pyodbc
 
 
+def build_restart_command() -> list[str]:
+    """Возвращает команду, используемую штатным перезапуском приложения."""
+    return [
+        sys.executable,
+        os.path.abspath(sys.argv[0]),
+        *sys.argv[1:],
+    ]
+
+
 # =========================================================
 #  Потоки
 # =========================================================
@@ -81,9 +90,30 @@ class MigrationThread(QThread):
         self.target_dir = target_dir
         self.server = server
         self.database = database
+        self.restart_scheduled = False
 
     def run(self):
+        log_file = None
+        migrator = None
         try:
+            log_dir = os.path.join(get_app_dir(), "data")
+            os.makedirs(log_dir, exist_ok=True)
+            log_path = os.path.join(log_dir, "migration.log")
+            log_file = open(log_path, "a", encoding="utf-8")
+            log_file.write(
+                f"\n=== Начало миграции: "
+                f"{datetime.datetime.now().isoformat(timespec='seconds')} ===\n"
+            )
+            log_file.flush()
+
+            def write_log(message: str):
+                log_file.write(
+                    f"{datetime.datetime.now().isoformat(timespec='seconds')} "
+                    f"{message}\n"
+                )
+                log_file.flush()
+                self.log.emit(message)
+
             cfg = {
                 "server": self.server,
                 "database": self.database,
@@ -106,15 +136,76 @@ class MigrationThread(QThread):
                 sql_server=self.server,
                 sql_database=self.database,
                 sql_conn_str_builder=conn_builder,
-                log=lambda msg: self.log.emit(msg),
+                log=write_log,
                 progress=lambda p: self.progress.emit(p),
+                cleanup_log_path=log_path,
             )
             migrator.run()
-            self.finished.emit(True, "Миграция завершена")
+            restart_command = build_restart_command()
+
+            if migrator.access_driver_installed_by_migration:
+                self.restart_scheduled = migrator._schedule_access_driver_uninstall(
+                    restart_command
+                )
+                if (
+                    not self.restart_scheduled
+                    and not migrator.access_driver_cleanup_started
+                ):
+                    self.log.emit(
+                        "Не удалось запланировать удаление Access Engine; "
+                        "запланирована попытка перезапуска без удаления."
+                    )
+                    self.restart_scheduled = migrator.schedule_application_restart(
+                        restart_command
+                    )
+                elif not self.restart_scheduled:
+                    self.log.emit(
+                        "Удаление Access Engine запущено, но помощник "
+                        "перезапуска не удалось запланировать."
+                    )
+            else:
+                self.restart_scheduled = migrator.schedule_application_restart(
+                    restart_command
+                )
+
+            if self.restart_scheduled:
+                completion_message = (
+                    "Миграция завершена. Программа сейчас перезапустится."
+                )
+            else:
+                completion_message = (
+                    "Миграция завершена, но автоматический перезапуск "
+                    "не удалось запланировать."
+                )
+            write_log(completion_message)
+            self.finished.emit(True, completion_message)
         except Exception as e:
             import traceback
-            self.log.emit(traceback.format_exc())
+            details = traceback.format_exc()
+            if log_file is not None:
+                try:
+                    log_file.write(details + "\n")
+                    log_file.flush()
+                except OSError as log_error:
+                    self.log.emit(
+                        f"Не удалось записать ошибку в журнал миграции: {log_error}"
+                    )
+            self.log.emit(details)
+            if migrator and migrator.access_driver_installed_by_migration:
+                try:
+                    if not migrator._schedule_access_driver_uninstall():
+                        self.log.emit(
+                            "Не удалось запланировать удаление Access Engine "
+                            "после ошибки миграции."
+                        )
+                except Exception as cleanup_error:
+                    self.log.emit(
+                        f"Ошибка планирования удаления Access Engine: {cleanup_error}"
+                    )
             self.finished.emit(False, str(e))
+        finally:
+            if log_file is not None:
+                log_file.close()
 
 
 class LocalDBStatusThread(QThread):
@@ -765,9 +856,13 @@ class DatabaseTab(QWidget):
         try:
             self.btn_migrate.setEnabled(True)
             if ok:
-                QMessageBox.information(self, "Миграция", f"✅ {msg}")
                 self.conn_status.setText(f"✅ {msg}")
                 self.conn_status.setStyleSheet("color: green;")
+                if self.migr_thread.restart_scheduled:
+                    from PyQt6.QtWidgets import QApplication
+                    QApplication.instance().quit()
+                else:
+                    QMessageBox.information(self, "Миграция", f"✅ {msg}")
             else:
                 QMessageBox.critical(self, "Ошибка миграции", msg)
                 self.conn_status.setText(f"❌ {msg}")
@@ -897,10 +992,7 @@ class DatabaseTab(QWidget):
     def on_restart(self):
         """Перезапускает текущий процесс программы."""
         import subprocess
-        python = sys.executable
-        script = os.path.abspath(sys.argv[0])
-        args = sys.argv[1:]
 
         from PyQt6.QtWidgets import QApplication
         QApplication.instance().quit()
-        subprocess.Popen([python, script, *args])
+        subprocess.Popen(build_restart_command())
