@@ -320,21 +320,14 @@ class ReferencesTab(QWidget):
 
     def _load(self):
         try:
-            # Отделение и Заведующий — из Settings
+            # Отделение, Заведующий, Организация — только из Settings
             s = get_settings_with_defaults()
             self.otdelenie_edit.setText(s.get("otdelenie_name", ""))
             self.zaved_edit.setText(s.get("otdelenie_head", ""))
+            self.org_edit.setText(s.get("organizatsia_name", ""))
 
             with get_connection() as conn:
                 cur = conn.cursor()
-                # Организация — из Settings (если задана), иначе из таблицы
-                org_name = s.get("organizatsia_name", "")
-                if not org_name:
-                    cur.execute("SELECT TOP 1 OrganName FROM Organizatsia")
-                    row = cur.fetchone()
-                    if row:
-                        org_name = row[0] or ""
-                self.org_edit.setText(org_name)
                 cur.execute("SELECT PatsientGroupName FROM PatsientGroup ORDER BY PatsientGroupName")
                 self.grp_list.clear()
                 for row in cur.fetchall():
