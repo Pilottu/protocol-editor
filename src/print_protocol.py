@@ -167,7 +167,7 @@ def build_html(data: dict) -> str:
 
 <div class="header">
     <div class="org">{_value(data.get('OrganizatsiaName'))}</div>
-    <div class="otd">{_value(data.get('OtdelenieName'))}</div>
+    <div class="otd">Отделение {_value(data.get('OtdelenieName'))}</div>
     <div class="nomer">Протокол № {_value(data.get('Nomer'))}</div>
     <div class="date">{date_str}</div>
     <div class="issledovanie">{_value(data.get('IssledovanieName'))}</div>

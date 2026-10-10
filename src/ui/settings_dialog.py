@@ -4,6 +4,7 @@ from PyQt6.QtWidgets import (
     QLabel, QLineEdit, QPushButton, QCheckBox, QRadioButton,
     QGroupBox, QFormLayout, QGridLayout, QListWidget,
     QComboBox, QSpinBox, QMessageBox, QTreeWidget, QTreeWidgetItem,
+    QInputDialog,
 )
 from PyQt6.QtCore import Qt
 
@@ -251,9 +252,13 @@ class ReferencesTab(QWidget):
         grp_layout.addLayout(grp_left, stretch=1)
         grp_btn_layout = QVBoxLayout()
         btn_grp_add = QPushButton("Добавить")
-        btn_grp_change = QPushButton("Изменить")
+        btn_grp_del = QPushButton("Удалить")
+        btn_grp_add.clicked.connect(self.on_group_add)
+        btn_grp_del.clicked.connect(self.on_group_del)
         grp_btn_layout.addWidget(btn_grp_add)
-        grp_btn_layout.addWidget(btn_grp_change)
+        grp_btn_layout.addWidget(btn_grp_del)
+        # При выборе группы в списке — подставляем имя в поле редактирования
+        self.grp_list.itemSelectionChanged.connect(self.on_group_selected)
         grp_btn_layout.addStretch()
         grp_layout.addLayout(grp_btn_layout)
         layout.addWidget(grp_group)
@@ -306,12 +311,23 @@ class ReferencesTab(QWidget):
         iss_form.addWidget(rep_group)
 
         iss_btn_row = QHBoxLayout()
-        btn_iss_change = QPushButton("Изменить")
+        btn_iss_change = QPushButton("Удалить")
         btn_iss_add = QPushButton("Добавить")
+        btn_iss_change.clicked.connect(self.on_iss_del)
+        btn_iss_add.clicked.connect(self.on_iss_add)
         iss_btn_row.addStretch()
         iss_btn_row.addWidget(btn_iss_change)
         iss_btn_row.addWidget(btn_iss_add)
         iss_btn_row.addStretch()
+        # При выборе исследования — подставляем имя в поле
+        self.iss_tree.currentItemChanged.connect(self.on_iss_selected)
+                # При изменении любой галочки — сразу сохраняем в БД
+        for chk in (self.chk_lecheb, self.chk_sanats, self.chk_intub,
+                    self.chk_smiv, self.chk_phmetr,
+                    self.chk_tsitologia, self.chk_gistologia,
+                    self.chk_show_in_report):
+            chk.stateChanged.connect(self._save_iss_flags)
+        self.order_spin.valueChanged.connect(self._save_iss_flags)
         iss_form.addLayout(iss_btn_row)
 
         iss_layout.addWidget(iss_form_widget, stretch=1)
@@ -355,10 +371,308 @@ class ReferencesTab(QWidget):
                     else:
                         self.iss_tree.addTopLevelItem(item)
                 self.iss_tree.expandAll()
+                # Если что-то было выбрано — перечитаем галочки для него
+                if self.iss_tree.currentItem() is not None:
+                    self.on_iss_selected(self.iss_tree.currentItem(), None)
         except Exception as e:
             QMessageBox.warning(self, "Ошибка", f"Не удалось загрузить справочники:\n{e}")
 
 
+    # ---------- Группы пациентов ----------
+
+    def on_group_selected(self):
+        """При выборе группы — подставить её имя в поле ввода."""
+        item = self.grp_list.currentItem()
+        if item:
+            self.grp_edit.setText(item.text())
+
+    def on_group_add(self):
+        name = self.grp_edit.text().strip()
+        if not name:
+            QMessageBox.warning(self, "Ошибка", "Введите название группы.")
+            return
+        try:
+            with get_connection() as conn:
+                cur = conn.cursor()
+                cur.execute(
+                    "INSERT INTO PatsientGroup (PatsientGroupName) VALUES (?)",
+                    [name]
+                )
+                conn.commit()
+            self.grp_edit.clear()
+            self._load()
+        except Exception as e:
+            QMessageBox.warning(self, "Ошибка", f"Не удалось добавить группу:\n{e}")
+
+    def on_group_del(self):
+        item = self.grp_list.currentItem()
+        if not item:
+            QMessageBox.warning(self, "Ошибка", "Выберите группу в списке.")
+            return
+        name = item.text()
+        # Проверим, используется ли группа пациентами
+        try:
+            with get_connection() as conn:
+                cur = conn.cursor()
+                cur.execute(
+                    "SELECT COUNT(*) FROM Patsient WHERE PatsientGroupID = "
+                    "(SELECT PatsientGroupID FROM PatsientGroup WHERE PatsientGroupName = ?)",
+                    [name]
+                )
+                cnt = cur.fetchone()[0]
+        except Exception as e:
+            QMessageBox.warning(self, "Ошибка", f"Не удалось проверить группу:\n{e}")
+            return
+
+        if cnt > 0:
+            QMessageBox.warning(
+                self, "Нельзя удалить",
+                f"Группа «{name}» используется {cnt} пациентами.\n"
+                f"Сначала смените им группу, потом удалите."
+            )
+            return
+
+        ans = QMessageBox.question(
+            self, "Удалить группу",
+            f"Удалить группу «{name}»?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        if ans != QMessageBox.StandardButton.Yes:
+            return
+
+        try:
+            with get_connection() as conn:
+                cur = conn.cursor()
+                cur.execute("DELETE FROM PatsientGroup WHERE PatsientGroupName = ?", [name])
+                conn.commit()
+            self.grp_edit.clear()
+            self._load()
+        except Exception as e:
+            QMessageBox.warning(self, "Ошибка", f"Не удалось удалить группу:\n{e}")
+
+    # ---------- Исследования ----------
+
+    def on_iss_selected(self, current, previous):
+        """При выборе исследования — подставить имя и загрузить его флаги."""
+        if current is None:
+            return
+        info = current.data(0, Qt.ItemDataRole.UserRole) or {}
+        if info.get("type") != "issled":
+            return
+
+        self.iss_name_edit.setText(current.text(0))
+
+        # Загружаем флаги из IssledovanieType
+        iss_id = info.get("id")
+        if iss_id is None:
+            # NULL-ID: сбрасываем все галочки
+            for chk in (self.chk_lecheb, self.chk_sanats, self.chk_intub,
+                        self.chk_smiv, self.chk_phmetr,
+                        self.chk_tsitologia, self.chk_gistologia):
+                chk.setChecked(False)
+            self.order_spin.setValue(0)
+            self.chk_show_in_report.setChecked(False)
+            return
+
+        try:
+            with get_connection() as conn:
+                cur = conn.cursor()
+                cur.execute(
+                    """SELECT Biopsia, Tsitologia, Gistologia, Lecheb,
+                              Sanats, Intybastia, PHMetr, Smiv,
+                              Visible, ReportOrder
+                       FROM IssledovanieType WHERE IssledovanieID = ?""",
+                    [iss_id]
+                )
+                row = cur.fetchone()
+        except Exception as e:
+            QMessageBox.warning(self, "Ошибка", f"Не удалось загрузить флаги:\n{e}")
+            return
+
+        if not row:
+            return
+
+        (biopsia, tsitologia, gistologia, lecheb,
+         sanats, intybastia, phmetr, smiv,
+         visible, report_order) = row
+
+        self.chk_tsitologia.setChecked(bool(tsitologia))
+        self.chk_gistologia.setChecked(bool(gistologia))
+        self.chk_lecheb.setChecked(bool(lecheb))
+        self.chk_sanats.setChecked(bool(sanats))
+        self.chk_intub.setChecked(bool(intybastia))
+        self.chk_phmetr.setChecked(bool(phmetr))
+        self.chk_smiv.setChecked(bool(smiv))
+        self.chk_show_in_report.setChecked(bool(visible))
+        self.order_spin.setValue(int(report_order) if report_order else 0)
+
+    def on_iss_add(self):
+        name = self.iss_name_edit.text().strip()
+        if not name:
+            QMessageBox.warning(self, "Ошибка", "Введите название исследования.")
+            return
+
+        # Определяем группу, в которую добавлять:
+        # — если выбрана группа → в неё
+        # — если выбрано исследование → в его группу (родитель)
+        # — если ничего не выбрано → спросим
+        group_id = None
+        item = self.iss_tree.currentItem()
+        if item is not None:
+            info = item.data(0, Qt.ItemDataRole.UserRole) or {}
+            if info.get("type") == "group":
+                group_id = info.get("id")
+            elif info.get("type") == "issled":
+                parent = item.parent()
+                if parent is not None:
+                    pinfo = parent.data(0, Qt.ItemDataRole.UserRole) or {}
+                    if pinfo.get("type") == "group":
+                        group_id = pinfo.get("id")
+
+        # Если группу определить не удалось — предлагаем выбрать
+        if group_id is None:
+            # Собираем все группы из дерева
+            groups = []
+            for i in range(self.iss_tree.topLevelItemCount()):
+                g = self.iss_tree.topLevelItem(i)
+                ginfo = g.data(0, Qt.ItemDataRole.UserRole) or {}
+                if ginfo.get("type") == "group":
+                    groups.append((ginfo["id"], g.text(0)))
+            if not groups:
+                QMessageBox.warning(self, "Ошибка", "Нет ни одной группы исследований.")
+                return
+            names = [g[1] for g in groups]
+            choice, ok = QInputDialog.getItem(
+                self, "Выбор группы", "В какую группу добавить:", names, 0, False
+            )
+            if not ok or not choice:
+                return
+            for gid, gname in groups:
+                if gname == choice:
+                    group_id = gid
+                    break
+
+        try:
+            with get_connection() as conn:
+                cur = conn.cursor()
+                cur.execute(
+                    "INSERT INTO IssledovanieType (Issledovanie, IssledovanieGroupID) VALUES (?, ?)",
+                    [name, group_id]
+                )
+                conn.commit()
+            self.iss_name_edit.clear()
+            self._load()
+        except Exception as e:
+            QMessageBox.warning(self, "Ошибка", f"Не удалось добавить исследование:\n{e}")
+
+    def _save_iss_flags(self):
+        """Сохраняет галочки выбранного исследования в IssledovanieType."""
+        item = self.iss_tree.currentItem()
+        if item is None:
+            return
+        info = item.data(0, Qt.ItemDataRole.UserRole) or {}
+        if info.get("type") != "issled":
+            return
+        iss_id = info.get("id")
+        if iss_id is None:
+            return
+
+        try:
+            with get_connection() as conn:
+                cur = conn.cursor()
+                cur.execute(
+                    """UPDATE IssledovanieType SET
+                          Tsitologia = ?, Gistologia = ?, Lecheb = ?,
+                          Sanats = ?, Intybastia = ?, PHMetr = ?, Smiv = ?,
+                          Visible = ?, ReportOrder = ?
+                       WHERE IssledovanieID = ?""",
+                    [
+                        1 if self.chk_tsitologia.isChecked() else 0,
+                        1 if self.chk_gistologia.isChecked() else 0,
+                        1 if self.chk_lecheb.isChecked() else 0,
+                        1 if self.chk_sanats.isChecked() else 0,
+                        1 if self.chk_intub.isChecked() else 0,
+                        1 if self.chk_phmetr.isChecked() else 0,
+                        1 if self.chk_smiv.isChecked() else 0,
+                        1 if self.chk_show_in_report.isChecked() else 0,
+                        self.order_spin.value(),
+                        iss_id,
+                    ]
+                )
+                conn.commit()
+        except Exception as e:
+            QMessageBox.warning(self, "Ошибка", f"Не удалось сохранить флаги:\n{e}")
+            
+    def on_iss_del(self):
+        # 1. Имя из поля
+        name = self.iss_name_edit.text().strip()
+        if not name:
+            QMessageBox.warning(
+                self, "Ничего не выбрано",
+                "Выберите исследование в дереве слева — его имя появится в поле."
+            )
+            return
+
+        # 2. Проверим, используется ли это исследование в протоколах
+        #    (по имени, через IssledovanieID — а если ID NULL, всё равно поймаем)
+        try:
+            with get_connection() as conn:
+                cur = conn.cursor()
+                cur.execute(
+                    """
+                    SELECT COUNT(*) FROM Protocol
+                    WHERE IssledovanieID IN (
+                        SELECT IssledovanieID FROM IssledovanieType WHERE Issledovanie = ?
+                    )
+                    """,
+                    [name]
+                )
+                cnt = cur.fetchone()[0]
+        except Exception as e:
+            QMessageBox.warning(self, "Ошибка", f"Не удалось проверить:\n{e}")
+            return
+
+        if cnt > 0:
+            QMessageBox.warning(
+                self, "Нельзя удалить",
+                f"Исследование «{name}» используется в {cnt} протоколах.\n"
+                f"Удаление невозможно."
+            )
+            return
+
+        # 3. Подтверждение
+        ans = QMessageBox.question(
+            self, "Удалить исследование",
+            f"Удалить исследование «{name}»?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        if ans != QMessageBox.StandardButton.Yes:
+            return
+
+        # 4. Удаляем ПО ИМЕНИ (работает и когда IssledovanieID = NULL)
+        try:
+            with get_connection() as conn:
+                cur = conn.cursor()
+                cur.execute("DELETE FROM IssledovanieType WHERE Issledovanie = ?", [name])
+                deleted = cur.rowcount
+                conn.commit()
+
+            if deleted == 0:
+                QMessageBox.warning(
+                    self, "Не удалено",
+                    f"Запись «{name}» не найдена в базе (возможно, уже удалена)."
+                )
+            else:
+                QMessageBox.information(
+                    self, "Удалено",
+                    f"Исследование «{name}» удалено ({deleted} запись)."
+                )
+
+            self.iss_name_edit.clear()
+            self._load()              # перечитывает дерево
+        except Exception as e:
+            QMessageBox.warning(self, "Ошибка", f"Не удалось удалить исследование:\n{e}")
+            
 class SettingsDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)

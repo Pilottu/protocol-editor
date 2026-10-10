@@ -56,7 +56,45 @@ class MainWindow(QMainWindow):
             years -= 1
         if years < 0:
             years = 0
-        self.vozrast_edit.setText(str(years))    
+        self.vozrast_edit.setText(str(years))
+    def _apply_iss_flags_visibility(self):
+        """Скрывает флаги в «Шапке», которые не разрешены для текущего исследования."""
+        iss_id = self.issledovanie_combo.currentData()
+        if not iss_id:
+            # Нет исследования — показываем все (или прячем все — решайте сами)
+            for chk in [self.chk_biopsia, self.chk_tsitologia, self.chk_gistologia,
+                        self.chk_sanats, self.chk_lecheb, self.chk_intub,
+                        self.chk_phmetr, self.chk_smiv]:
+                chk.setVisible(True)
+            return
+
+        try:
+            with get_connection() as conn:
+                cur = conn.cursor()
+                cur.execute(
+                    """SELECT Biopsia, Tsitologia, Gistologia, Lecheb,
+                              Sanats, Intybastia, PHMetr, Smiv
+                       FROM IssledovanieType WHERE IssledovanieID = ?""",
+                    [iss_id]
+                )
+                row = cur.fetchone()
+        except Exception:
+            return
+
+        if not row:
+            return
+
+        (biopsia, tsitologia, gistologia, lecheb,
+         sanats, intybastia, phmetr, smiv) = row
+
+        self.chk_biopsia.setVisible(bool(biopsia))
+        self.chk_tsitologia.setVisible(bool(tsitologia))
+        self.chk_gistologia.setVisible(bool(gistologia))
+        self.chk_lecheb.setVisible(bool(lecheb))
+        self.chk_sanats.setVisible(bool(sanats))
+        self.chk_intub.setVisible(bool(intybastia))
+        self.chk_phmetr.setVisible(bool(phmetr))
+        self.chk_smiv.setVisible(bool(smiv))    
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Редактор протоколов (Python)")
@@ -108,6 +146,7 @@ class MainWindow(QMainWindow):
 
         self.fio_edit.textChanged.connect(self.on_fio_changed)
         self.issledovanie_combo.currentIndexChanged.connect(self.on_filter_changed)
+        self.issledovanie_combo.currentIndexChanged.connect(self._apply_iss_flags_visibility)
 
         # --- Вкладки ---
         self.tabs = QTabWidget()
@@ -670,7 +709,7 @@ class MainWindow(QMainWindow):
                 if self.issledovanie_combo.itemData(i) == iss_id:
                     self.issledovanie_combo.setCurrentIndex(i)
                     break
-
+        self._apply_iss_flags_visibility()
         self._set_nomer_silent(str(proto.get("Nomer") or ""))
         if proto.get("ProtocolDate"):
             d = proto["ProtocolDate"]
@@ -1218,6 +1257,14 @@ class MainWindow(QMainWindow):
             from ui.settings_dialog import SettingsDialog
             dlg = SettingsDialog(self)
             dlg.exec()
+            # После закрытия настроек — перечитываем справочники,
+            # чтобы новые группы/исследования/врачи появились в комбобоксах.
+            try:
+                self.references = get_references()
+                self._load_references()
+                self._load_tree()
+            except Exception as e:
+                QMessageBox.warning(self, "Ошибка", f"Не удалось обновить справочники:\n{e}")
         except Exception as e:
             QMessageBox.critical(self, "Ошибка", f"Не удалось открыть настройки:\n{e}")
 
